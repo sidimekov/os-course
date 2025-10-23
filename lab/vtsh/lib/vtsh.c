@@ -11,101 +11,118 @@
 #include <time.h>
 #include <unistd.h>
 
-static double timespec_diff_sec(struct timespec a, struct timespec b) {
-  time_t ds = b.tv_sec - a.tv_sec;
-  long dns = b.tv_nsec - a.tv_nsec;
-  return (double)ds + (double)dns / 1e9;
+enum {
+  VTSH_TOK_INIT_CAP = 16,
+  VTSH_ARGV_INIT_CAP = 8,
+  VTSH_PARTS_INIT_CAP = 4,
+  VTSH_GROWTH_FACTOR = 2,
+  VTSH_EXEC_ERROR = 127,
+  VTSH_SIGNAL_EXIT_BASE = 128
+};
+static const double VTSH_NSEC_PER_SEC = 1e9;
+#define VTSH_EXIT_CODE 0xEE00
+
+static double timespec_diff_sec(struct timespec time0, struct timespec time1) {
+  time_t diff_sec = time1.tv_sec - time0.tv_sec;
+  long diff_nsec = time1.tv_nsec - time0.tv_nsec;
+  return (double)diff_sec + (double)diff_nsec / VTSH_NSEC_PER_SEC;
 }
 
 void vtsh_print_prompt(void) {
-  fprintf(stdout, "vtsh> ");
-  fflush(stdout);
+  if (fprintf(stdout, "vtsh> ") < 0) {
+    perror("fprintf");
+  }
+  if (fflush(stdout) != 0) {
+    perror("fflush");
+  }
 }
 
-#include <errno.h>
-#include <stdbool.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
-static void push_char(char** tok, size_t* tlen, size_t* tcap, char c) {
+static void push_char(char** tok, size_t* tlen, size_t* tcap, char chr) {
   if (*tlen + 1 >= *tcap) {
-    size_t new_cap = (*tcap ? *tcap * 2 : 16);
-    char* p = realloc(*tok, new_cap);
-    if (!p) {
+    size_t new_cap = (*tcap ? *tcap * VTSH_GROWTH_FACTOR : VTSH_TOK_INIT_CAP);
+    char* ptr = realloc(*tok, new_cap);
+    if (!ptr) {
       perror("realloc");
-      exit(1);
+      // _exit(1);
+      _exit(1);
     }
-    *tok = p;
+    *tok = ptr;
     *tcap = new_cap;
   }
-  (*tok)[(*tlen)++] = c;
+  (*tok)[(*tlen)++] = chr;
 }
 
 static void argv_append(
     char*** argv, size_t* argc, size_t* cap, const char* tok, size_t tlen
 ) {
-  if (tlen == 0)
+  if (tlen == 0) {
     return;
-  char* s2 = malloc(tlen + 1);
-  if (!s2) {
-    perror("malloc");
-    exit(1);
   }
-  memcpy(s2, tok, tlen);
-  s2[tlen] = '\0';
+  char* seg2 = malloc(tlen + 1);
+  if (!seg2) {
+    perror("malloc");
+    _exit(1);
+  }
+  memcpy(seg2, tok, tlen);
+  seg2[tlen] = '\0';
 
   if (*argc + 2 > *cap) {
-    size_t new_cap = (*cap ? *cap * 2 : 8);
-    char** v = realloc(*argv, new_cap * sizeof(char*));
-    if (!v) {
+    size_t new_cap = (*cap ? *cap * VTSH_GROWTH_FACTOR : VTSH_ARGV_INIT_CAP);
+    char** vec = realloc(*argv, new_cap * sizeof(char*));
+    if (!vec) {
       perror("realloc");
-      exit(1);
+      _exit(1);
     }
-    *argv = v;
+    *argv = vec;
     *cap = new_cap;
   }
-  (*argv)[(*argc)++] = s2;
+  (*argv)[(*argc)++] = seg2;
   (*argv)[*argc] = NULL;
 }
 
-static int parse_argv(const char* s, char*** out_argv) {
+static int parse_argv(const char* str, char*** out_argv) {
   char** argv = NULL;
-  size_t argc = 0, cap = 0;
+  size_t argc = 0;
+  size_t cap = 0;
 
   char* tok = NULL;
-  size_t tlen = 0, tcap = 0;
+  size_t tlen = 0;
+  size_t tcap = 0;
 
-  const char* p = s;
+  const char* ptr = str;
   int quotes = 0;
 
-  while (*p == ' ' || *p == '\t')
-    ++p;
+  while (*ptr == ' ' || *ptr == '\t') {
+    ++ptr;
+  }
 
-  for (; *p; ++p) {
-    if (*p == '\\' && p[1]) {
-      push_char(&tok, &tlen, &tcap, *++p);
+  for (; *ptr; ++ptr) {
+    int ch_ptr = (int)(unsigned char)*ptr;
+
+    if (*ptr == '\\' && ptr[1]) {
+      push_char(&tok, &tlen, &tcap, *++ptr);
       continue;
     }
-    if (!quotes && (*p == '\'' || *p == '\"')) {
-      quotes = *p;
+    if (!quotes && (*ptr == '\'' || *ptr == '\"')) {
+      quotes = ch_ptr;
       continue;
     }
-    if (quotes && *p == quotes) {
+    if (quotes && *ptr == quotes) {
       quotes = 0;
       continue;
     }
-    if (!quotes && (*p == ' ' || *p == '\t')) {
+    if (!quotes && (*ptr == ' ' || *ptr == '\t')) {
       argv_append(&argv, &argc, &cap, tok, tlen);
       tlen = 0;
 
-      while (p[1] == ' ' || p[1] == '\t')
-        ++p;
+      while (ptr[1] == ' ' || ptr[1] == '\t') {
+        ++ptr;
+      }
 
       continue;
     }
 
-    push_char(&tok, &tlen, &tcap, *p);
+    push_char(&tok, &tlen, &tcap, *ptr);
   }
 
   argv_append(&argv, &argc, &cap, tok, tlen);
@@ -116,165 +133,271 @@ static int parse_argv(const char* s, char*** out_argv) {
   return (int)argc;
 }
 
-static int run_one(char** argv, int argc, double* elapsed_sec, bool* is_time) {
-  if (!argv || !argv[0]) {
-    if (is_time)
-      *is_time = false;
-    return 0;
+// run_one helpers
+
+static bool strip_time_flag(char** argv, int* argc) {
+  if (!argv || !*argc) {
+    return false;
   }
 
-  bool t_flag = false;
-  if (argc > 0) {
-    const char* last = argv[argc - 1];
-    if (last && (strcmp(argv[argc - 1], "-t") == 0 ||
-                 strcmp(argv[argc - 1], "--time") == 0)) {
-      t_flag = true;
-      free(argv[argc - 1]);
-      argv[--argc] = NULL;
-    }
+  const char* last = argv[*argc - 1];
+  if (last && (strcmp(last, "-t") == 0 || strcmp(last, "--time") == 0)) {
+    free(argv[*argc - 1]);
+    argv[--(*argc)] = NULL;
+    return true;
   }
-  if (is_time)
-    *is_time = t_flag;
+  return false;
+}
 
-  if (argc == 0) {
-    *elapsed_sec = 0.0;
-    return 0;
+static int builtin_cd(char** argv, bool t_flag, double* elapsed_sec) {
+  struct timespec time0 = {0};
+  struct timespec time1 = {0};
+  if (t_flag && clock_gettime(CLOCK_MONOTONIC, &time0) != 0) {
+    perror("clock_gettime");
   }
 
-  if (strcmp(argv[0], "exit") == 0) {
-    return 0xEE00;
-  }
-  if (strcmp(argv[0], "cd") == 0) {
-    struct timespec t0 = {0}, t1 = {0};
-    if (t_flag)
-      clock_gettime(CLOCK_MONOTONIC, &t0);
-
-    const char* dir = argv[1] ? argv[1] : getenv("HOME");
-    int rc = dir ? chdir(dir) : -1;
-    if (rc != 0)
-      perror("cd");
-    if (t_flag) {
-      clock_gettime(CLOCK_MONOTONIC, &t1);
-      *elapsed_sec = timespec_diff_sec(t0, t1);
-    } else {
-      *elapsed_sec = 0.0;
-    }
-    return (rc == 0) ? 0 : 1;
+  const char* dir = argv[1] ? argv[1] : secure_getenv("HOME");
+  int ret_code = dir ? chdir(dir) : -1;
+  if (ret_code != 0) {
+    perror("cd");
   }
 
-  struct timespec t0 = {0}, t1 = {0};
+  if (t_flag && clock_gettime(CLOCK_MONOTONIC, &time1) != 0) {
+    perror("clock_gettime");
+  }
+  if (elapsed_sec) {
+    *elapsed_sec = t_flag ? timespec_diff_sec(time0, time1) : 0.0;
+  }
+  return (ret_code == 0) ? 0 : 1;
+}
 
-  if (t_flag)
-    clock_gettime(CLOCK_MONOTONIC, &t0);
+static int run_external(char** argv, bool t_flag, double* elapsed_sec) {
+  struct timespec time0 = {0};
+  struct timespec time1 = {0};
+  if (t_flag && clock_gettime(CLOCK_MONOTONIC, &time0) != 0) {
+    perror("clock_gettime");
+  }
 
   pid_t pid = fork();
   if (pid < 0) {
     perror("fork");
-    return 127;
+    return VTSH_EXEC_ERROR;
   }
   if (pid == 0) {
     execvp(argv[0], argv);
     if (errno == ENOENT) {
-      dprintf(STDOUT_FILENO, "Command not found\n");
+      if (dprintf(STDOUT_FILENO, "Command not found\n") < 0) {
+      }
     }
-    // perror("execvp");
-    _exit(127);
+    _exit(VTSH_EXEC_ERROR);
   }
 
   int status = 0;
   if (waitpid(pid, &status, 0) < 0) {
     perror("waitpid");
-    return 127;
+    return VTSH_EXEC_ERROR;
   }
 
-  if (t_flag) {
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    *elapsed_sec = timespec_diff_sec(t0, t1);
+  if (t_flag && clock_gettime(CLOCK_MONOTONIC, &time1) != 0) {
+    perror("clock_gettime");
+  }
+  if (elapsed_sec) {
+    *elapsed_sec = t_flag ? timespec_diff_sec(time0, time1) : 0.0;
   }
 
-  if (WIFEXITED(status))
+  if (WIFEXITED(status)) {
     return WEXITSTATUS(status);
-  if (WIFSIGNALED(status))
-    return 128 + WTERMSIG(status);
-  return 127;
+  }
+  if (WIFSIGNALED(status)) {
+    return VTSH_SIGNAL_EXIT_BASE + WTERMSIG(status);
+  }
+  return VTSH_SIGNAL_EXIT_BASE;
+}
+
+static int run_one(char** argv, int argc, double* elapsed_sec, bool* is_time) {
+  if (!argv || !argv[0]) {
+    if (is_time) {
+      *is_time = false;
+    }
+    return 0;
+  }
+
+  bool t_flag = strip_time_flag(argv, &argc);
+  if (is_time) {
+    *is_time = t_flag;
+  }
+
+  if (argc == 0) {
+    if (elapsed_sec) {
+      *elapsed_sec = 0.0;
+    }
+    return 0;
+  }
+
+  if (strcmp(argv[0], "exit") == 0) {
+    return VTSH_EXIT_CODE;
+  }
+  if (strcmp(argv[0], "cd") == 0) {
+    return builtin_cd(argv, t_flag, elapsed_sec);
+  }
+
+  return run_external(argv, t_flag, elapsed_sec);
+}
+
+// split_by_and helpers
+
+static inline bool vtsh_is_and_and(const char* ptr, int quotes) {
+  return quotes == 0 && ptr[0] == '&' && ptr[1] == '&';
+}
+
+static inline void vtsh_update_quotes(int ch_ptr, int* quotes) {
+  if (*quotes == 0 && (ch_ptr == '\'' || ch_ptr == '\"')) {
+    *quotes = ch_ptr;
+  } else if (*quotes && ch_ptr == *quotes) {
+    *quotes = 0;
+  }
+}
+
+static inline void vtsh_ensure_capacity(
+    char*** parts, size_t* cap, size_t need
+) {
+  if (need >= *cap) {
+    size_t new_cap = (*cap ? *cap * VTSH_GROWTH_FACTOR : VTSH_PARTS_INIT_CAP);
+    while (need >= new_cap) {
+      new_cap *= 2;
+    }
+    char** tmp = realloc(*parts, new_cap * sizeof(*tmp));
+    if (!tmp) {
+      perror("realloc");
+      _exit(1);
+    }
+    *parts = tmp;
+    *cap = new_cap;
+  }
+}
+
+static inline void vtsh_append_range(
+    char*** parts, size_t* cap, size_t* count, const char* start, size_t len
+) {
+  char* str = strndup(start, len);
+  if (!str) {
+    perror("strndup");
+    _exit(1);
+  }
+  vtsh_ensure_capacity(parts, cap, *count);
+  (*parts)[(*count)++] = str;
+}
+
+static inline void vtsh_append_cstr(
+    char*** parts, size_t* cap, size_t* count, const char* str
+) {
+  char* dup = strdup(str);
+  if (!dup) {
+    perror("strdup");
+    _exit(1);
+  }
+  vtsh_ensure_capacity(parts, cap, *count);
+  (*parts)[(*count)++] = dup;
 }
 
 static char** split_by_and(const char* line, size_t* count) {
-  size_t cap = 4, n = 0;
+  size_t cap = VTSH_PARTS_INIT_CAP;
+  size_t str_n = 0;
   char** parts = malloc(cap * sizeof(char*));
   if (!parts) {
     perror("malloc");
-    exit(1);
+    _exit(1);
   }
 
-  const char *p = line, *seg_start = line;
+  const char* ptr = line;
+  const char* seg_start = line;
   int quotes = 0;
-  while (*p) {
-    if (quotes == 0 && p[0] == '&' && p[1] == '&') {
-      size_t len = (size_t)(p - seg_start);
-      char* s = strndup(seg_start, len);
-      if (!s) {
-        perror("strndup");
-        exit(1);
-      }
-      if (n >= cap) {
-        cap *= 2;
-        parts = realloc(parts, cap * sizeof(char*));
-        if (!parts) {
-          perror("realloc");
-          exit(1);
-        }
-      }
-      parts[n++] = s;
-      p += 2;
-      seg_start = p;
+  while (*ptr) {
+    if (vtsh_is_and_and(ptr, quotes)) {
+      size_t len = (size_t)(ptr - seg_start);
+      vtsh_append_range(&parts, &cap, &str_n, seg_start, len);
+      ptr += 2;
+      seg_start = ptr;
       continue;
     }
-    if (quotes == 0 && (*p == '\'' || *p == '\"'))
-      quotes = *p;
-    else if (quotes && *p == quotes)
-      quotes = 0;
-    else if (*p == '\\' && p[1])
-      ++p;
-    ++p;
-  }
-  if (seg_start) {
-    char* s = strdup(seg_start);
-    if (!s) {
-      perror("strdup");
-      exit(1);
+
+    int ch_ptr = (int)(unsigned char)*ptr;
+    if (ch_ptr == '\\' && ptr[1]) {
+      ++ptr;
+    } else {
+      vtsh_update_quotes(ch_ptr, &quotes);
     }
-    if (n >= cap) {
-      cap *= 2;
-      parts = realloc(parts, cap * sizeof(char*));
-      if (!parts) {
-        perror("realloc");
-        exit(1);
-      }
-    }
-    parts[n++] = s;
+    ++ptr;
   }
-  *count = n;
+
+  vtsh_append_cstr(&parts, &cap, &str_n, seg_start);
+
+  *count = str_n;
   return parts;
 }
 
+// vtsh_execute_line helpers
+
+static inline char* vtsh_lstrip(char* str) {
+  while (*str == ' ' || *str == '\t') {
+    ++str;
+  }
+  return str;
+}
+
+static inline void vtsh_rstrip_inplace(char* str) {
+  size_t len = strlen(str);
+  while (len > 0 && (str[len - 1] == ' ' || str[len - 1] == '\t' ||
+                     str[len - 1] == '\n')) {
+    str[--len] = '\0';
+  }
+}
+
+static inline void vtsh_free_argv(char** argv) {
+  if (!argv) {
+    return;
+  }
+  for (char** arg = argv; *arg; ++arg) {
+    free(*arg);
+  }
+  free(argv);
+}
+
+typedef struct {
+  size_t start_index;
+  size_t total_count;
+} VtshSpan;
+
+static inline void vtsh_free_parts_span(char** parts, VtshSpan span) {
+  for (size_t k = span.start_index; k < span.total_count; ++k) {
+    free(parts[k]);
+  }
+  free(parts);
+}
+
+static inline void vtsh_print_time(double elapsed) {
+  if (printf("[time] %.6f s\n", elapsed) < 0) {
+    perror("printf");
+  }
+  if (fflush(stdout) != 0) {
+    perror("fflush");
+  }
+}
+
 int vtsh_execute_line(const char* line) {
-  if (!line)
+  if (!line) {
     return 0;
+  }
 
   size_t parts_n = 0;
   char** parts = split_by_and(line, &parts_n);
 
   int last_status = 0;
   for (size_t i = 0; i < parts_n; ++i) {
-    char* seg = parts[i];
+    char* seg0 = parts[i];
+    char* seg = vtsh_lstrip(seg0);
+    vtsh_rstrip_inplace(seg);
 
-    while (*seg == ' ' || *seg == '\t')
-      ++seg;
-    size_t L = strlen(seg);
-    while (L > 0 &&
-           (seg[L - 1] == ' ' || seg[L - 1] == '\t' || seg[L - 1] == '\n'))
-      seg[--L] = '\0';
     if (*seg == '\0') {
       free(parts[i]);
       continue;
@@ -290,28 +413,25 @@ int vtsh_execute_line(const char* line) {
 
     double elapsed = 0.0;
     bool is_time = false;
-    int rc = run_one(argv, argc, &elapsed, &is_time);
-    if (rc == 0xEE00) {  // exit
-      for (char** arg = argv; arg && *arg; ++arg)
-        free(*arg);
-      free(argv);
-      for (size_t k = i; k < parts_n; ++k)
-        free(parts[k]);
-      free(parts);
+    int ret_code = run_one(argv, argc, &elapsed, &is_time);
+
+    if (ret_code == VTSH_EXIT_CODE) {
+      vtsh_free_argv(argv);
+      vtsh_free_parts_span(
+          parts, (VtshSpan){.start_index = i, .total_count = parts_n}
+      );
       return -1;
     }
 
     if (is_time) {
-      printf("[time] %.6f s\n", elapsed);
-      fflush(stdout);
+      vtsh_print_time(elapsed);
     }
 
-    last_status = rc;
+    last_status = ret_code;
 
-    for (char** arg = argv; arg && *arg; ++arg)
-      free(*arg);
-    free(argv);
-    free(parts[i]);
+    vtsh_free_argv(argv);
+
+    free(seg0);
   }
   free(parts);
   return 0;
