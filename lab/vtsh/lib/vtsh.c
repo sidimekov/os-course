@@ -199,14 +199,71 @@ static int run_one(char** argv, int argc, double* elapsed_sec, bool* is_time) {
   return 127;
 }
 
+static char** split_by_and(const char* line, size_t* count) {
+  size_t cap = 4, n = 0;
+  char** parts = malloc(cap * sizeof(char*));
+  if (!parts) {
+    perror("malloc");
+    exit(1);
+  }
+
+  const char *p = line, *seg_start = line;
+  int quotes = 0;
+  while (*p) {
+    if (quotes == 0 && p[0] == '&' && p[1] == '&') {
+      size_t len = (size_t)(p - seg_start);
+      char* s = strndup(seg_start, len);
+      if (!s) {
+        perror("strndup");
+        exit(1);
+      }
+      if (n >= cap) {
+        cap *= 2;
+        parts = realloc(parts, cap * sizeof(char*));
+        if (!parts) {
+          perror("realloc");
+          exit(1);
+        }
+      }
+      parts[n++] = s;
+      p += 2;
+      seg_start = p;
+      continue;
+    }
+    if (quotes == 0 && (*p == '\'' || *p == '\"'))
+      quotes = *p;
+    else if (quotes && *p == quotes)
+      quotes = 0;
+    else if (*p == '\\' && p[1])
+      ++p;
+    ++p;
+  }
+  if (seg_start) {
+    char* s = strdup(seg_start);
+    if (!s) {
+      perror("strdup");
+      exit(1);
+    }
+    if (n >= cap) {
+      cap *= 2;
+      parts = realloc(parts, cap * sizeof(char*));
+      if (!parts) {
+        perror("realloc");
+        exit(1);
+      }
+    }
+    parts[n++] = s;
+  }
+  *count = n;
+  return parts;
+}
+
 int vtsh_execute_line(const char* line) {
   if (!line)
     return 0;
 
-  /*одна команда пока что без &&*/
-  size_t parts_n = 1;
-  char** parts = malloc(sizeof(char*));
-  parts[0] = strdup(line);
+  size_t parts_n = 0;
+  char** parts = split_by_and(line, &parts_n);
 
   int last_status = 0;
   for (size_t i = 0; i < parts_n; ++i) {
