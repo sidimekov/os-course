@@ -2,6 +2,8 @@
 #include "vtsh.h"
 
 #include <errno.h>
+#include <sched.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -171,6 +173,15 @@ static int builtin_cd(char** argv, bool t_flag, double* elapsed_sec) {
   return (ret_code == 0) ? 0 : 1;
 }
 
+static int vtsh_child_main(void* arg) {
+  char** argv = (char**)arg;
+  execvp(argv[0], argv);
+  if (errno == ENOENT) {
+    dprintf(STDOUT_FILENO, "Command not found\n");
+  }
+  _exit(VTSH_EXEC_ERROR);
+}
+
 static int run_external(char** argv, bool t_flag, double* elapsed_sec) {
   struct timespec time0 = {0};
   struct timespec time1 = {0};
@@ -178,25 +189,28 @@ static int run_external(char** argv, bool t_flag, double* elapsed_sec) {
     perror("clock_gettime");
   }
 
-  pid_t pid = fork();
-  if (pid < 0) {
-    perror("fork");
+  const size_t stack_size = 1U << 20U;
+  void* stack = malloc(stack_size);
+  if (!stack) {
+    perror("malloc");
     return VTSH_EXEC_ERROR;
   }
-  if (pid == 0) {
-    execvp(argv[0], argv);
-    if (errno == ENOENT) {
-      if (dprintf(STDOUT_FILENO, "Command not found\n") < 0) {
-      }
-    }
-    _exit(VTSH_EXEC_ERROR);
+  void* stack_top = (char*)stack + stack_size;
+
+  pid_t pid = clone(vtsh_child_main, stack_top, SIGCHLD, argv);
+  if (pid < 0) {
+    perror("clone");
+    free(stack);
+    return VTSH_EXEC_ERROR;
   }
 
   int status = 0;
   if (waitpid(pid, &status, 0) < 0) {
     perror("waitpid");
+    free(stack);
     return VTSH_EXEC_ERROR;
   }
+  free(stack);
 
   if (t_flag && clock_gettime(CLOCK_MONOTONIC, &time1) != 0) {
     perror("clock_gettime");
