@@ -415,12 +415,85 @@ typedef struct {
   size_t idx;
 } VtshCloneArgs;
 
+// добавить один символ в буфер plain (часть разделённая < >)
+static void vtsh_plain_push(char** plain, size_t* len, size_t* cap, char chr) {
+  if (*len + 1 >= *cap) {
+    size_t new_cap = *cap ? (*cap * 2) : VTSH_TOK_INIT_CAP;
+    char* tmp = realloc(*plain, new_cap);
+    if (!tmp) {
+      perror("realloc");
+      _exit(1);
+    }
+    *plain = tmp;
+    *cap = new_cap;
+  }
+  (*plain)[(*len)++] = chr;
+}
+
+// если буфер plain не пустой -> закинуть его в clean argv
+static void vtsh_plain_flush_to_clean(
+    char** plain, size_t* len, char*** clean, int* clean_i
+) {
+  if (*len == 0) {
+    return;
+  }
+  char* str = malloc(*len + 1);
+  if (!str) {
+    perror("malloc");
+    _exit(1);
+  }
+  memcpy(str, *plain, *len);
+  str[*len] = '\0';
+  (*clean)[(*clean_i)++] = str;
+  *len = 0;
+}
+
+// get filename from current token tail or from next argv
+static char *vtsh_take_fname(
+    const char *tok,
+    size_t tok_len,
+    size_t *ptr,
+    char **argv,
+    int *idx,
+    int argc
+) {
+  size_t start = *ptr;
+  while (*ptr < tok_len && tok[*ptr] != '<' && tok[*ptr] != '>') {
+    ++(*ptr);
+  }
+  size_t len = *ptr - start;
+  if (len > 0) {
+    char *name = strndup(tok + start, len);
+    if (!name) {
+      perror("strndup");
+      _exit(1);
+    }
+    return name;
+  }
+  // if len <= 0, next arg
+  if (*idx + 1 >= argc) {
+    if (fprintf(stderr, "redirect: missing filename\n") < 0) {
+      perror("fprintf");
+    }
+    _exit(1);
+  }
+  (*idx)++;
+  char *name = strdup(argv[*idx]);
+  if (!name) {
+    perror("strdup");
+    _exit(1);
+  }
+  return name;
+}
+
 static VtshCmd vtsh_parse_cmd_with_redirs(const char* seg) {
   VtshCmd cmd = {0};
   char** argv = NULL;
+
+  // сначала парсинг по пробелам и др.
   int argc = parse_argv(seg, &argv);
 
-  // clean args without redirs
+  // clean args without redirs - args for execvp
   char** clean = malloc(((size_t)argc + 1U) * sizeof(char*));
   if (!clean) {
     perror("malloc");
@@ -429,32 +502,58 @@ static VtshCmd vtsh_parse_cmd_with_redirs(const char* seg) {
   int clean_i = 0;
 
   for (int i = 0; i < argc; i++) {
-    if (strcmp(argv[i], ">") == 0 || strcmp(argv[i], ">>") == 0) {
-      bool app = (argv[i][1] == '>');
-      if (i + 1 >= argc) {
-        if (fprintf(stderr, "redirect: missing filename\n") < 0) {
-          perror("fprintf");
-        }
-        _exit(1);
-      }
-      cmd.out_path = strdup(argv[i + 1]);
-      cmd.append = app;
-      i++;
-      continue;
-    }
+    const char* tok = argv[i];
+    size_t tok_len = strlen(tok);
 
-    if (strcmp(argv[i], "<") == 0) {
-      if (i + 1 >= argc) {
-        if (fprintf(stderr, "redirect: missing filename\n") < 0) {
-          perror("fprintf");
+    // буфер для части токена, разделённой < > |
+    char* plain = NULL;
+    size_t plain_len = 0;
+    size_t plain_cap = 0;
+
+    size_t ptr = 0;
+    while (ptr < tok_len) {
+      char chr = tok[ptr];
+      if (chr == '>' || chr == '<') {
+
+        // plain буфер в clean argv
+        vtsh_plain_flush_to_clean(&plain, &plain_len, &clean, &clean_i);
+
+        bool is_out = (chr == '>');
+        bool append = false;
+        ++ptr;
+        if (is_out && ptr < tok_len && tok[ptr] == '>') {
+          append = true;
+          ++ptr;
         }
+
+        // собрать имя файла из этого же токена до следующего < или >
+        char* fname = vtsh_take_fname(tok, tok_len, &ptr, argv, &i, argc);
+
+        // записываем редирект
+        if (is_out) {
+          free(cmd.out_path);
+          cmd.out_path = fname;
+          cmd.append = append;
+        } else {
+          free(cmd.in_path);
+          cmd.in_path = fname;
+        }
+      } else {
+        vtsh_plain_push(&plain, &plain_len, &plain_cap, chr);
+        ++ptr;
+      }
+    }
+    if (plain_len > 0) {
+      char* str = malloc(plain_len + 1);
+      if (!str) {
+        perror("malloc");
         _exit(1);
       }
-      cmd.in_path = strdup(argv[i + 1]);
-      i++;
-      continue;
+      memcpy(str, plain, plain_len);
+      str[plain_len] = '\0';
+      clean[clean_i++] = str;
     }
-    clean[clean_i++] = argv[i];
+    free(plain);
   }
   clean[clean_i] = NULL;
 
@@ -890,9 +989,7 @@ static int vtsh_handle_simple_cmd(
   return 0;
 }
 
-static int vtsh_handle_redir_cmd(
-    VtshCmd* cmd, int* out_status
-) {
+static int vtsh_handle_redir_cmd(VtshCmd* cmd, int* out_status) {
   bool t_flag = false;
   // проверка -t/--time на конце cmd.argv
   int argc = 0;
