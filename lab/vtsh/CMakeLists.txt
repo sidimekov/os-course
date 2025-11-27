@@ -11,4 +11,4 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_subdirectory(bin)
 add_subdirectory(lib)
-add_subdirectory(src/cpu)
+add_subdirectory(src)

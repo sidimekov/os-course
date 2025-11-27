@@ -10,17 +10,16 @@
 #include <string.h>
 #include <unistd.h>
 
-enum {
-  EMA_DEFAULT_BUCKET_COUNT = 65536,
-  EMA_LINE_BUF_SIZE = 256,
-  EMA_MAX_WORD_INPUT = 32,
-  EMA_WORD_LEN = 8,
-  EMA_WORD_BUF_LEN = 9,
-  EMA_BASE_STR_TO_L = 10,
-  EMA_EXIT_FAILURE_CODE = 1
-};
-
-// #define EMA_WORD_BUF_LEN 9
+/* Константы, чтобы не было магических чисел */
+#define EMA_DEFAULT_BUCKET_COUNT 65536U
+#define EMA_LINE_BUF_SIZE 256U
+#define EMA_MAX_WORD_INPUT 32U
+#define EMA_WORD_LEN 8U
+#define EMA_WORD_BUF_LEN 9U /* 8 + '\0' */
+#define EMA_BASE_STR_TO_L 10
+#define EMA_EXIT_FAILURE_CODE 1
+#define EMA_DEFAULT_REPEAT 1U
+#define EMA_HASH_MULT 2654435761u
 
 typedef struct Node {
   int32_t id;
@@ -33,6 +32,14 @@ typedef struct {
   size_t bucket_count;
 } HashTable;
 
+typedef struct {
+  const char* path_a;
+  const char* path_b;
+  const char* path_out;
+  size_t bucket_count;
+  size_t repeat_count;
+} EmaArgs;
+
 static void die_perror(const char* msg) {
   perror(msg);
   _exit(EMA_EXIT_FAILURE_CODE);
@@ -40,7 +47,7 @@ static void die_perror(const char* msg) {
 
 static void die_msg(const char* msg) {
   if (fputs(msg, stderr) < 0) {
-    // уже пишем в stderr, если и это не вышло — просто выходим
+    /* ignore */
   }
   _exit(EMA_EXIT_FAILURE_CODE);
 }
@@ -48,19 +55,21 @@ static void die_msg(const char* msg) {
 static void print_usage_and_exit(const char* prog) {
   if (fprintf(
           stderr,
-          "usage: %s --a A.txt --b B.txt --out C.txt [--bucket_count N]\n",
-          (prog != NULL) ? prog : "ema-join-hash"
+          "usage: %s --a A.txt --b B.txt --out C.txt "
+          "[--bucket_count N] [--repeat N]\n",
+          prog ? prog : "ema-join-hash"
       ) < 0) {
     perror("fprintf");
   }
   _exit(EMA_EXIT_FAILURE_CODE);
 }
 
-static inline size_t hash_id(size_t bucket_count, int32_t id) {
-  static const uint32_t HASH_MULT = 2654435761U;
-  const uint32_t value = (uint32_t)id;
+/* порядок: сначала size_t, потом int32_t — чтобы clang-tidy не ругался */
+static inline size_t hash_id(size_t bucket_count, int32_t key) {
+  const uint32_t HASH_MULT = EMA_HASH_MULT;
+  const uint32_t key_u = (uint32_t)key;
   const uint32_t mod = (uint32_t)bucket_count;
-  const uint32_t hashed = value * HASH_MULT;
+  const uint32_t hashed = key_u * HASH_MULT;
   return (size_t)(hashed % mod);
 }
 
@@ -76,7 +85,7 @@ static void ht_free(HashTable* table) {
   if (table == NULL || table->buckets == NULL) {
     return;
   }
-  for (size_t i = 0U; i < table->bucket_count; ++i) {
+  for (size_t i = 0; i < table->bucket_count; ++i) {
     Node* cur = table->buckets[i];
     while (cur != NULL) {
       Node* next = cur->next;
@@ -86,16 +95,16 @@ static void ht_free(HashTable* table) {
   }
   free(table->buckets);
   table->buckets = NULL;
-  table->bucket_count = 0U;
+  table->bucket_count = 0;
 }
 
-static void ht_insert(HashTable* table, int32_t w_id, const char* word) {
-  const size_t bucket = hash_id(table->bucket_count, w_id);
+static void ht_insert(HashTable* table, int32_t key_id, const char* word) {
+  const size_t bucket = hash_id(table->bucket_count, key_id);
   Node* node = (Node*)malloc(sizeof(Node));
   if (node == NULL) {
     die_perror("malloc");
   }
-  node->id = w_id;
+  node->id = key_id;
   (void)strncpy(node->word, word, EMA_WORD_LEN);
   node->word[EMA_WORD_LEN] = '\0';
   node->next = table->buckets[bucket];
@@ -109,8 +118,8 @@ static int64_t read_first_count(FILE* file) {
     die_msg("failed to read first line (count)\n");
   }
 
-  char* end_ptr = NULL;
   errno = 0;
+  char* end_ptr = NULL;
   const long long value = strtoll(buffer, &end_ptr, EMA_BASE_STR_TO_L);
   if (errno != 0 || end_ptr == buffer || value < 0) {
     die_msg("invalid count in first line\n");
@@ -118,10 +127,8 @@ static int64_t read_first_count(FILE* file) {
   return (int64_t)value;
 }
 
-/* простейший парсер строки вида: "<id> <word>" */
-static bool read_row(
-    FILE* file, int32_t* out_id, char out_word[EMA_WORD_BUF_LEN]
-) {
+/* без VLA: указатель вместо char out_word[EMA_WORD_BUF_LEN] */
+static bool read_row(FILE* file, int32_t* out_id, char* out_word) {
   char line[EMA_LINE_BUF_SIZE];
   const int read_size = (int)sizeof(line);
   if (fgets(line, read_size, file) == NULL) {
@@ -136,13 +143,13 @@ static bool read_row(
     return false;
   }
 
-  // число
   errno = 0;
   char* end_id = NULL;
-  long id_val = strtol(ptr, &end_id, EMA_BASE_STR_TO_L);
+  const long id_val = strtol(ptr, &end_id, EMA_BASE_STR_TO_L);
   if (errno != 0 || end_id == ptr) {
     die_msg("invalid id in row\n");
   }
+
   while (*end_id == ' ' || *end_id == '\t') {
     ++end_id;
   }
@@ -150,12 +157,11 @@ static bool read_row(
     die_msg("missing word in row\n");
   }
 
-  // слово
   char word_buf[EMA_MAX_WORD_INPUT];
-  size_t word_len = 0U;
+  size_t word_len = 0;
   while (*end_id != '\0' && *end_id != '\n' && *end_id != ' ' && *end_id != '\t'
   ) {
-    if (word_len + 1U >= sizeof(word_buf)) {
+    if (word_len + 1 >= sizeof(word_buf)) {
       break;
     }
     word_buf[word_len++] = *end_id;
@@ -166,24 +172,16 @@ static bool read_row(
   *out_id = (int32_t)id_val;
   (void)strncpy(out_word, word_buf, EMA_WORD_LEN);
   out_word[EMA_WORD_LEN] = '\0';
-
   return true;
 }
 
-typedef struct {
-  const char* path_a;
-  const char* path_b;
-  const char* path_out;
-  size_t bucket_count;
-} EmaArgs;
-
 static EmaArgs parse_args(int argc, char** argv) {
-  EmaArgs args = {
-      .path_a = NULL,
-      .path_b = NULL,
-      .path_out = NULL,
-      .bucket_count = EMA_DEFAULT_BUCKET_COUNT,
-  };
+  EmaArgs args;
+  args.path_a = NULL;
+  args.path_b = NULL;
+  args.path_out = NULL;
+  args.bucket_count = EMA_DEFAULT_BUCKET_COUNT;
+  args.repeat_count = EMA_DEFAULT_REPEAT;
 
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--a") == 0 && i + 1 < argc) {
@@ -194,8 +192,10 @@ static EmaArgs parse_args(int argc, char** argv) {
       args.path_out = argv[++i];
     } else if (strcmp(argv[i], "--bucket_count") == 0 && i + 1 < argc) {
       args.bucket_count = (size_t)strtoull(argv[++i], NULL, EMA_BASE_STR_TO_L);
+    } else if (strcmp(argv[i], "--repeat") == 0 && i + 1 < argc) {
+      args.repeat_count = (size_t)strtoull(argv[++i], NULL, EMA_BASE_STR_TO_L);
     } else {
-      print_usage_and_exit(argv[0]);
+      print_usage_and_exit((argc > 0) ? argv[0] : "ema-join-hash");
     }
   }
 
@@ -204,6 +204,9 @@ static EmaArgs parse_args(int argc, char** argv) {
   }
   if (args.bucket_count == 0U) {
     die_msg("bucket_count must be > 0\n");
+  }
+  if (args.repeat_count == 0U) {
+    die_msg("repeat must be > 0\n");
   }
   return args;
 }
@@ -228,82 +231,93 @@ int main(int argc, char** argv) {
       if (fprintf(stderr, "unexpected EOF in A at row %" PRId64 "\n", i) < 0) {
         perror("fprintf");
       }
-      if (fclose(file_a) < 0) {
-        perror("fclose");
-      }
+      (void)fclose(file_a);
       ht_free(&table);
       _exit(EMA_EXIT_FAILURE_CODE);
     }
     ht_insert(&table, id_a, word_a);
   }
   if (fclose(file_a) != 0) {
+    ht_free(&table);
     die_perror("fclose A");
   }
 
-  FILE* file_b = fopen(args.path_b, "r");
-  if (file_b == NULL) {
-    ht_free(&table);
-    die_perror("fopen B");
-  }
-  const int64_t count_b = read_first_count(file_b);
+  /* Повторяем по B repeat_count раз, но out_count запоминаем
+   * только на последней итерации - даёт дополнительную CPU-нагрузку */
+  size_t out_count = 0;
+  int64_t count_b_final = 0;
 
-  size_t out_count = 0U;
-  for (int64_t i = 0; i < count_b; ++i) {
-    int32_t id_b = 0;
-    char word_b[EMA_WORD_BUF_LEN];
-    if (!read_row(file_b, &id_b, word_b)) {
-      if (fprintf(stderr, "unexpected EOF in B at row %" PRId64 "\n", i) < 0) {
-        perror("fprintf");
-      }
-      if (fclose(file_b) < 0) {
-        perror("fclose");
-      }
+  for (size_t rep = 0; rep < args.repeat_count; ++rep) {
+    FILE* file_b = fopen(args.path_b, "r");
+    if (file_b == NULL) {
       ht_free(&table);
-      _exit(EMA_EXIT_FAILURE_CODE);
+      die_perror("fopen B");
     }
-    const size_t bucket = hash_id(table.bucket_count, id_b);
-    for (Node* node = table.buckets[bucket]; node != NULL; node = node->next) {
-      if (node->id == id_b) {
-        ++out_count;
+    const int64_t count_b = read_first_count(file_b);
+
+    size_t local_out_count = 0;
+    for (int64_t i = 0; i < count_b; ++i) {
+      int32_t id_b = 0;
+      char word_b[EMA_WORD_BUF_LEN];
+      if (!read_row(file_b, &id_b, word_b)) {
+        if (fprintf(
+                stderr,
+                "unexpected EOF in B at row %" PRId64 " (rep=%zu)\n",
+                i,
+                rep
+            ) < 0) {
+          perror("fprintf");
+        }
+        (void)fclose(file_b);
+        ht_free(&table);
+        _exit(EMA_EXIT_FAILURE_CODE);
+      }
+      const size_t bucket = hash_id(table.bucket_count, id_b);
+      for (Node* node = table.buckets[bucket]; node != NULL;
+           node = node->next) {
+        if (node->id == id_b) {
+          ++local_out_count;
+        }
       }
     }
-  }
-  if (fclose(file_b) != 0) {
-    ht_free(&table);
-    die_perror("fclose B");
+
+    if (fclose(file_b) != 0) {
+      ht_free(&table);
+      die_perror("fclose B");
+    }
+
+    if (rep == args.repeat_count - 1U) {
+      out_count = local_out_count;
+      count_b_final = count_b;
+    }
   }
 
-  file_b = fopen(args.path_b, "r");
-  if (file_b == NULL) {
+  /* Второй проход (уже без повторов) — записываем результат в файл. */
+  FILE* file_b2 = fopen(args.path_b, "r");
+  if (file_b2 == NULL) {
     ht_free(&table);
     die_perror("fopen B second pass");
   }
-  (void)read_first_count(file_b);
+  (void)read_first_count(file_b2);
 
   FILE* file_out = fopen(args.path_out, "w");
   if (file_out == NULL) {
-    if (fclose(file_b) < 0) {
-      perror("fclose");
-    }
+    (void)fclose(file_b2);
     ht_free(&table);
     die_perror("fopen out");
   }
 
   if (fprintf(file_out, "%zu\n", out_count) < 0) {
-    if (fclose(file_b) < 0) {
-      perror("fclose");
-    }
-    if (fclose(file_out) < 0) {
-      perror("fclose");
-    }
+    (void)fclose(file_b2);
+    (void)fclose(file_out);
     ht_free(&table);
     die_perror("fprintf out_count");
   }
 
-  for (int64_t i = 0; i < count_b; ++i) {
+  for (int64_t i = 0; i < count_b_final; ++i) {
     int32_t id_b = 0;
     char word_b[EMA_WORD_BUF_LEN];
-    if (!read_row(file_b, &id_b, word_b)) {
+    if (!read_row(file_b2, &id_b, word_b)) {
       if (fprintf(
               stderr,
               "unexpected EOF in B (second pass) at row %" PRId64 "\n",
@@ -311,12 +325,8 @@ int main(int argc, char** argv) {
           ) < 0) {
         perror("fprintf");
       }
-      if (fclose(file_b) < 0) {
-        perror("fclose");
-      }
-      if (fclose(file_out) < 0) {
-        perror("fclose");
-      }
+      (void)fclose(file_b2);
+      (void)fclose(file_out);
       ht_free(&table);
       _exit(EMA_EXIT_FAILURE_CODE);
     }
@@ -324,12 +334,8 @@ int main(int argc, char** argv) {
     for (Node* node = table.buckets[bucket]; node != NULL; node = node->next) {
       if (node->id == id_b) {
         if (fprintf(file_out, "%d %s %s\n", id_b, node->word, word_b) < 0) {
-          if (fclose(file_b) < 0) {
-            perror("fclose");
-          }
-          if (fclose(file_out) < 0) {
-            perror("fclose");
-          }
+          (void)fclose(file_b2);
+          (void)fclose(file_out);
           ht_free(&table);
           die_perror("fprintf join row");
         }
@@ -337,10 +343,8 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (fclose(file_b) != 0) {
-    if (fclose(file_out) < 0) {
-      perror("fclose");
-    }
+  if (fclose(file_b2) != 0) {
+    (void)fclose(file_out);
     ht_free(&table);
     die_perror("fclose B second pass");
   }

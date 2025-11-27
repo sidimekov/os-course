@@ -1,0 +1,155 @@
+// Функции запуска одной команды и изменение времени
+
+#define _GNU_SOURCE
+
+#include "vtsh.h"
+#include "vtsh_internal.h"
+
+#include <errno.h>
+#include <sched.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <time.h>
+
+double vtsh_timespec_diff_sec(struct timespec time0, struct timespec time1) {
+  time_t diff_sec = time1.tv_sec - time0.tv_sec;
+  long diff_nsec = time1.tv_nsec - time0.tv_nsec;
+  return (double)diff_sec + (double)diff_nsec / VTSH_NSEC_PER_SEC;
+}
+
+// run_one helpers
+
+static bool strip_time_flag(char** argv, int* argc) {
+  if (!argv || !*argc) {
+    return false;
+  }
+
+  const char* last = argv[*argc - 1];
+  if (last && (strcmp(last, "-t") == 0 || strcmp(last, "--time") == 0)) {
+    free(argv[*argc - 1]);
+    argv[--(*argc)] = NULL;
+    return true;
+  }
+  return false;
+}
+
+static int builtin_cd(char** argv, bool t_flag, double* elapsed_sec) {
+  struct timespec time0 = {0};
+  struct timespec time1 = {0};
+  if (t_flag && clock_gettime(CLOCK_MONOTONIC, &time0) != 0) {
+    perror("clock_gettime");
+  }
+
+  const char* dir = (argv[1] != NULL) ? argv[1] : getenv("HOME");
+  int ret_code = (dir != NULL) ? chdir(dir) : -1;
+  if (ret_code != 0) {
+    perror("cd");
+  }
+
+  if (t_flag && clock_gettime(CLOCK_MONOTONIC, &time1) != 0) {
+    perror("clock_gettime");
+  }
+  if (elapsed_sec) {
+    *elapsed_sec = t_flag ? vtsh_timespec_diff_sec(time0, time1) : 0.0;
+  }
+  return (ret_code == 0) ? 0 : 1;
+}
+
+static int vtsh_child_main(void* arg) {
+  char** argv = (char**)arg;
+
+  execvp(argv[0], argv);
+  if (errno == ENOENT) {
+    dprintf(STDOUT_FILENO, "Command not found\n");
+  }
+  _exit(VTSH_EXEC_ERROR);
+}
+
+static int run_external(char** argv, bool t_flag, double* elapsed_sec) {
+  struct timespec time0 = {0};
+  struct timespec time1 = {0};
+  if (t_flag && clock_gettime(CLOCK_MONOTONIC, &time0) != 0) {
+    perror("clock_gettime");
+  }
+
+  const size_t stack_size = 1U << 20U;  // 1mb
+  void* stack = malloc(stack_size);
+  if (!stack) {
+    perror("malloc");
+    return VTSH_EXEC_ERROR;
+  }
+  void* stack_top = (char*)stack + stack_size;
+
+  pid_t pid = clone(vtsh_child_main, stack_top, SIGCHLD, argv);
+  if (pid < 0) {
+    perror("clone");
+    free(stack);
+    return VTSH_EXEC_ERROR;
+  }
+
+  int status = 0;
+  if (waitpid(pid, &status, 0) < 0) {
+    perror("waitpid");
+    free(stack);
+    return VTSH_EXEC_ERROR;
+  }
+  free(stack);
+
+  if (t_flag && clock_gettime(CLOCK_MONOTONIC, &time1) != 0) {
+    perror("clock_gettime");
+  }
+  if (elapsed_sec) {
+    *elapsed_sec = t_flag ? vtsh_timespec_diff_sec(time0, time1) : 0.0;
+  }
+
+  if (WIFEXITED(status)) {
+    return WEXITSTATUS(status);
+  }
+  if (WIFSIGNALED(status)) {
+    return VTSH_SIGNAL_EXIT_BASE + WTERMSIG(status);
+  }
+  return VTSH_SIGNAL_EXIT_BASE;
+}
+
+int vtsh_run_one(char** argv, int argc, double* elapsed_sec, bool* is_time) {
+  if (!argv || !argv[0]) {
+    if (is_time) {
+      *is_time = false;
+    }
+    return 0;
+  }
+
+  bool t_flag = strip_time_flag(argv, &argc);
+  if (is_time) {
+    *is_time = t_flag;
+  }
+
+  if (argc == 0) {
+    if (elapsed_sec) {
+      *elapsed_sec = 0.0;
+    }
+    return 0;
+  }
+
+  if (strcmp(argv[0], "exit") == 0) {
+    return VTSH_EXIT_CODE;
+  }
+  if (strcmp(argv[0], "cd") == 0) {
+    return builtin_cd(argv, t_flag, elapsed_sec);
+  }
+
+  return run_external(argv, t_flag, elapsed_sec);
+}
+
+inline void vtsh_print_time(double elapsed) {
+  if (printf("[time] %.6f s\n", elapsed) < 0) {
+    perror("printf");
+  }
+  if (fflush(stdout) != 0) {
+    perror("fflush");
+  }
+}
