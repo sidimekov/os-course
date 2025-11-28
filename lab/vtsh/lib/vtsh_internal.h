@@ -58,7 +58,8 @@ VtshCmd vtsh_parse_cmd_with_redirs(const char *seg);
 void    vtsh_cmd_free (VtshCmd *cmd);
 void    vtsh_cmds_free(VtshCmd *cmds, size_t n);
 int     vtsh_run_pipeline(char **pipe_parts, size_t pipe_n);
-int     vtsh_run_single_with_redirs(
-          VtshCmd *cmd, bool t_flag, double *elapsed_sec);
+int vtsh_run_single_with_redirs(VtshCmd* cmd, bool t_flag, double* elapsed_sec);
+
+pid_t vtsh_spawn_fn(int (*func)(void *), void *arg);
 
 #endif // VTSH_INTERNAL_H

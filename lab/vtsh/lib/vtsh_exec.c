@@ -73,7 +73,7 @@ static int vtsh_child_main(void* arg) {
 }
 
 // simple wrapper to run fn(arg) in child created by clone3
-static pid_t vtsh_spawn_fn(int (*func)(void *), void *arg) {
+pid_t vtsh_spawn_fn(int (*func)(void *), void *arg) {
 #ifdef SYS_clone3
   struct clone_args args;
   memset(&args, 0, sizeof(args));

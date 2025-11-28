@@ -433,28 +433,19 @@ int vtsh_run_pipeline(char** pipe_parts, size_t pipe_n) {
     return VTSH_EXEC_ERROR;
   }
 
-  const size_t stack_size = 1U << 20U;  // 1 mb
-  void** stacks = calloc(pipe_n, sizeof(void*));
-  if (!stacks) {
-    perror("calloc");
-    vtsh_close_all_pipes(pipes, pipe_n);
-    free(pipes);
-    vtsh_cmds_free(cmds, pipe_n);
-    free(pids);
-    return VTSH_EXEC_ERROR;
-  }
+  // const size_t stack_size = 1U << 20U;  // 1 mb
+  // void** stacks = calloc(pipe_n, sizeof(void*));
+  // if (!stacks) {
+  //   perror("calloc");
+  //   vtsh_close_all_pipes(pipes, pipe_n);
+  //   free(pipes);
+  //   vtsh_cmds_free(cmds, pipe_n);
+  //   free(pids);
+  //   return VTSH_EXEC_ERROR;
+  // }
 
-  // clone для создания дочерних процессов
+  // clone3 для создания дочерних процессов
   for (size_t i = 0; i < pipe_n; ++i) {
-    void* stack = malloc(stack_size);
-    if (!stack) {
-      perror("malloc stack");
-      pids[i] = -1;
-      continue;
-    }
-    stacks[i] = stack;
-    void* stack_top = (char*)stack + stack_size;
-
     VtshCloneArgs* pipeline = malloc(sizeof(*pipeline));
     if (!pipeline) {
       perror("malloc clone args");
@@ -466,10 +457,9 @@ int vtsh_run_pipeline(char** pipe_parts, size_t pipe_n) {
     pipeline->pipe_n = pipe_n;
     pipeline->idx = i;
 
-    // lowercase comment: create child with SIGCHLD so waitpid works
-    pid_t pid = clone(vtsh_pipeline_clone_entry, stack_top, SIGCHLD, pipeline);
+    pid_t pid = vtsh_spawn_fn(vtsh_pipeline_clone_entry, pipeline);
     if (pid < 0) {
-      perror("clone");
+      perror("clone3");
       pids[i] = -1;
       free(pipeline);
       continue;
@@ -514,28 +504,17 @@ int vtsh_run_single_with_redirs(
     perror("clock_gettime");
   }
 
-  const size_t stack_size = 1U << 20U;
-  void* stack = malloc(stack_size);
-  if (!stack) {
-    perror("malloc");
-    return VTSH_EXEC_ERROR;
-  }
-  void* stack_top = (char*)stack + stack_size;
-
-  pid_t pid = clone(vtsh_single_redir_child, stack_top, SIGCHLD, cmd);
+   pid_t pid = vtsh_spawn_fn(vtsh_single_redir_child, cmd);
   if (pid < 0) {
-    perror("clone");
-    free(stack);
+    perror("clone3");
     return VTSH_EXEC_ERROR;
   }
 
   int status = 0;
   if (waitpid(pid, &status, 0) < 0) {
     perror("waitpid");
-    free(stack);
     return VTSH_EXEC_ERROR;
   }
-  free(stack);
 
   if (t_flag && clock_gettime(CLOCK_MONOTONIC, &time1) != 0) {
     perror("clock_gettime");
