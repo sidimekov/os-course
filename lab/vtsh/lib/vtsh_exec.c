@@ -15,6 +15,9 @@
 #include <unistd.h>
 #include <time.h>
 
+#include <linux/sched.h> // struct clone_args
+#include <sys/syscall.h> // SYS_clone3
+
 double vtsh_timespec_diff_sec(struct timespec time0, struct timespec time1) {
   time_t diff_sec = time1.tv_sec - time0.tv_sec;
   long diff_nsec = time1.tv_nsec - time0.tv_nsec;
@@ -69,6 +72,34 @@ static int vtsh_child_main(void* arg) {
   _exit(VTSH_EXEC_ERROR);
 }
 
+// simple wrapper to run fn(arg) in child created by clone3
+static pid_t vtsh_spawn_fn(int (*func)(void *), void *arg) {
+#ifdef SYS_clone3
+  struct clone_args args;
+  memset(&args, 0, sizeof(args));
+  args.exit_signal = SIGCHLD;  // like fork: child sends SIGCHLD on exit
+
+  pid_t pid = (pid_t)syscall(SYS_clone3, &args, sizeof(args));
+  if (pid == -1) {
+    return -1; 
+  }
+  if (pid == 0) {
+    // child path
+    int ret_code = func(arg);  // execvp + _exit - сюда не вернётся
+    _exit(ret_code);
+  }
+  return pid;
+#else
+  pid_t pid = fork();
+  if (pid == 0) {
+    int ret_code = func(arg);
+    _exit(ret_code);
+  }
+  return pid;
+#endif
+}
+
+
 static int run_external(char** argv, bool t_flag, double* elapsed_sec) {
   struct timespec time0 = {0};
   struct timespec time1 = {0};
@@ -98,6 +129,7 @@ static int run_external(char** argv, bool t_flag, double* elapsed_sec) {
     return VTSH_EXEC_ERROR;
   }
   free(stack);
+
 
   if (t_flag && clock_gettime(CLOCK_MONOTONIC, &time1) != 0) {
     perror("clock_gettime");
