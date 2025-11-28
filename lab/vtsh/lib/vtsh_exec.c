@@ -2,21 +2,20 @@
 
 #define _GNU_SOURCE
 
-#include "vtsh.h"
-#include "vtsh_internal.h"
-
 #include <errno.h>
+#include <linux/sched.h>  // struct clone_args
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>  // SYS_clone3
 #include <sys/wait.h>
-#include <unistd.h>
 #include <time.h>
+#include <unistd.h>
 
-#include <linux/sched.h> // struct clone_args
-#include <sys/syscall.h> // SYS_clone3
+#include "vtsh.h"
+#include "vtsh_internal.h"
 
 double vtsh_timespec_diff_sec(struct timespec time0, struct timespec time1) {
   time_t diff_sec = time1.tv_sec - time0.tv_sec;
@@ -73,32 +72,21 @@ static int vtsh_child_main(void* arg) {
 }
 
 // simple wrapper to run fn(arg) in child created by clone3
-pid_t vtsh_spawn_fn(int (*func)(void *), void *arg) {
-#ifdef SYS_clone3
+pid_t vtsh_spawn_fn(int (*func)(void*), void* arg) {
   struct clone_args args;
   memset(&args, 0, sizeof(args));
-  args.exit_signal = SIGCHLD;  // like fork: child sends SIGCHLD on exit
+  args.exit_signal = SIGCHLD;
 
   pid_t pid = (pid_t)syscall(SYS_clone3, &args, sizeof(args));
   if (pid == -1) {
-    return -1; 
+    return -1;
   }
-  if (pid == 0) {
-    // child path
-    int ret_code = func(arg);  // execvp + _exit - сюда не вернётся
-    _exit(ret_code);
-  }
-  return pid;
-#else
-  pid_t pid = fork();
   if (pid == 0) {
     int ret_code = func(arg);
     _exit(ret_code);
   }
   return pid;
-#endif
 }
-
 
 static int run_external(char** argv, bool t_flag, double* elapsed_sec) {
   struct timespec time0 = {0};
@@ -107,29 +95,18 @@ static int run_external(char** argv, bool t_flag, double* elapsed_sec) {
     perror("clock_gettime");
   }
 
-  const size_t stack_size = 1U << 20U;  // 1mb
-  void* stack = malloc(stack_size);
-  if (!stack) {
-    perror("malloc");
-    return VTSH_EXEC_ERROR;
-  }
-  void* stack_top = (char*)stack + stack_size;
-
-  pid_t pid = clone(vtsh_child_main, stack_top, SIGCHLD, argv);
+  pid_t pid = vtsh_spawn_fn(vtsh_child_main, argv);
   if (pid < 0) {
-    perror("clone");
-    free(stack);
+    perror("clone3");
     return VTSH_EXEC_ERROR;
   }
 
   int status = 0;
   if (waitpid(pid, &status, 0) < 0) {
     perror("waitpid");
-    free(stack);
     return VTSH_EXEC_ERROR;
   }
-  free(stack);
-
+  
 
   if (t_flag && clock_gettime(CLOCK_MONOTONIC, &time1) != 0) {
     perror("clock_gettime");
@@ -138,6 +115,7 @@ static int run_external(char** argv, bool t_flag, double* elapsed_sec) {
     *elapsed_sec = t_flag ? vtsh_timespec_diff_sec(time0, time1) : 0.0;
   }
 
+  // что это
   if (WIFEXITED(status)) {
     return WEXITSTATUS(status);
   }
@@ -147,6 +125,7 @@ static int run_external(char** argv, bool t_flag, double* elapsed_sec) {
   return VTSH_SIGNAL_EXIT_BASE;
 }
 
+// что делает
 int vtsh_run_one(char** argv, int argc, double* elapsed_sec, bool* is_time) {
   if (!argv || !argv[0]) {
     if (is_time) {

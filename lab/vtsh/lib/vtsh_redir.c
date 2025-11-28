@@ -304,6 +304,7 @@ static VtshCmd* vtsh_build_cmds_from_pipe_parts(
 }
 
 // создать N - 1 pipes для N команд
+// что такое pipe()
 static int (*vtsh_create_pipes(size_t pipe_n))[2] {
   if (pipe_n <= 1) {
     return NULL;
