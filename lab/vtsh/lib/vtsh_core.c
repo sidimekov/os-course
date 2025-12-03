@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include "vtsh.h"
 #include "vtsh_internal.h"
@@ -13,6 +15,98 @@ void vtsh_print_prompt(void) {
   }
   if (fflush(stdout) != 0) {
     perror("fflush");
+  }
+}
+
+// background jobs (&)
+
+typedef struct {
+  pid_t pid;
+  int job_id;
+  char* cmdline;
+} VtshJob;
+
+static VtshJob* g_jobs = NULL;
+static size_t g_jobs_len = 0;
+static size_t g_jobs_cap = 0;
+static int g_next_job_id = 1;
+
+static int vtsh_bg_child_main(void* arg) {
+  char* line = (char*)arg;
+  (void)vtsh_execute_line(line);
+  free(line);
+  return 0;
+}
+
+static int vtsh_add_job(pid_t pid, char* cmdline) {
+  if (g_jobs_len == g_jobs_cap) {
+    size_t new_cap = (g_jobs_cap == 0) ? 4U : (g_jobs_cap * 2U);
+    VtshJob* tmp = realloc(g_jobs, new_cap * sizeof(*tmp));
+    if (!tmp) {
+      perror("realloc");
+      _exit(1);
+    }
+    g_jobs = tmp;
+    g_jobs_cap = new_cap;
+  }
+  int job_id = g_next_job_id++;
+  g_jobs[g_jobs_len].pid = pid;
+  g_jobs[g_jobs_len].job_id = job_id;
+  g_jobs[g_jobs_len].cmdline = cmdline;
+  g_jobs_len++;
+  return job_id;
+}
+
+static void vtsh_start_background_job(char* cmdline) {
+  pid_t pid = vtsh_spawn_fn(vtsh_bg_child_main, cmdline);
+  if (pid < 0) {
+    perror("vtsh_spawn_fn");
+    free(cmdline);
+    return;
+  }
+
+  int job_id = vtsh_add_job(pid, cmdline);
+
+  if (printf("[%d] %d\n", job_id, (int)pid) < 0) {
+    perror("printf");
+  }
+  if (fflush(stdout) != 0) {
+    perror("fflush");
+  }
+}
+
+static void vtsh_check_background_jobs(void) {
+  size_t iter = 0;
+  while (iter < g_jobs_len) {
+    int status = 0;
+    pid_t pid = waitpid(g_jobs[iter].pid, &status, WNOHANG);
+    if (pid == 0) {
+      ++iter;
+      continue;
+    }
+    if (pid < 0) {
+      free(g_jobs[iter].cmdline);
+      g_jobs[iter] = g_jobs[g_jobs_len - 1];
+      g_jobs_len--;
+      continue;
+    }
+
+    VtshJob job = g_jobs[iter];
+    free(job.cmdline);
+    g_jobs[iter] = g_jobs[g_jobs_len - 1];
+    g_jobs_len--;
+
+    const char* status_word = "Done";
+    if (WIFSIGNALED(status)) {
+      status_word = "Terminated";
+    }
+
+    if (printf("[%d] %s\t(pid=%d)\n", job.job_id, status_word, (int)pid) < 0) {
+      perror("printf");
+    }
+    if (fflush(stdout) != 0) {
+      perror("fflush");
+    }
   }
 }
 
@@ -121,11 +215,26 @@ static int vtsh_handle_redir_cmd(VtshCmd* cmd, int* out_status) {
   return 0;
 }
 
-// execute on bg without ret code
-static int vtsh_bg_child_main(void* arg) {
-  char* line = arg;
-  (void)vtsh_execute_line(line);
-  free(line);
+static int vtsh_run_segment_foreground(
+    char* seg, size_t part_idx, size_t parts_n, char** parts, int* last_status
+) {
+  if (vtsh_handle_pipeline_segment(seg, last_status)) {
+    return 0;
+  }
+
+  VtshCmd cmd = vtsh_parse_cmd_with_redirs(seg);
+  bool has_redir = (cmd.in_path != NULL) || (cmd.out_path != NULL);
+
+  if (!has_redir) {
+    int ret_code =
+        vtsh_handle_simple_cmd(&cmd, part_idx, parts_n, parts, last_status);
+    if (ret_code < 0) {
+      return -1;
+    }
+    return 0;
+  }
+
+  vtsh_handle_redir_cmd(&cmd, last_status);
   return 0;
 }
 
@@ -134,45 +243,7 @@ int vtsh_execute_line(const char* line) {
     return 0;
   }
 
-  // & handle
-  const char* end = line + strlen(line);
-
-  while (end > line && isspace((unsigned char)end[-1])) {
-    --end;
-  }
-
-  bool background = false;
-  if (end > line && end[-1] == '&') {
-    background = true;
-    --end;  // remove &
-
-    while (end > line && isspace((unsigned char)end[-1])) {
-      --end;
-    }
-  }
-
-  if (background) {
-    size_t clean_len = (size_t)(end - line);
-    char* clean_line = malloc(clean_len + 1);
-    if (!clean_line) {
-      perror("malloc");
-      return 0;
-    }
-
-    memcpy(clean_line, line, clean_len);
-    clean_line[clean_len] = '\0';
-
-    pid_t pid = vtsh_spawn_fn(vtsh_bg_child_main, clean_line);
-    if (pid < 0) {
-      perror("vtsh_spawn_fn");
-      free(clean_line);
-      return 0;
-    }
-
-    printf("[bg] %d\n", pid);
-
-    return 0;
-  }
+  vtsh_check_background_jobs();
 
   size_t parts_n = 0;
   char** parts = vtsh_split_by_and(line, &parts_n);
@@ -193,28 +264,100 @@ int vtsh_execute_line(const char* line) {
       continue;
     }
 
-    if (vtsh_handle_pipeline_segment(seg, &last_status)) {
-      free(seg0);
-      continue;
-    }
+    const char* ptr = seg;
+    const char* job_start = seg;
+    int quotes = 0;
+    bool has_bg_amp = false;
 
-    VtshCmd cmd = vtsh_parse_cmd_with_redirs(seg);
-    bool has_redir = (cmd.in_path != NULL) || (cmd.out_path != NULL);
-
-    if (!has_redir) {
-      // run_one
-      int ret_code =
-          vtsh_handle_simple_cmd(&cmd, i, parts_n, parts, &last_status);
-      free(seg0);
-      if (ret_code < 0) {
-        return -1;
+    // ищем & вне кавычек и обрабатываем cmd1 & cmd2 & cmd3
+    while (*ptr) {
+      if (*ptr == '\\' && ptr[1] != '\0') {
+        ptr += 2;
+        continue;
       }
+      if (quotes == 0 && (*ptr == '\'' || *ptr == '"')) {
+        quotes = (int)(unsigned char)*ptr;
+        ++ptr;
+        continue;
+      }
+      if (quotes != 0 && *ptr == (char)quotes) {
+        quotes = 0;
+        ++ptr;
+        continue;
+      }
+
+      if (quotes == 0 && *ptr == '&') {
+        has_bg_amp = true;
+
+        const char* job_str = job_start;
+        size_t len = (size_t)(ptr - job_start);
+
+        while (len > 0 && (*job_str == ' ' || *job_str == '\t')) {
+          ++job_str;
+          --len;
+        }
+        while (len > 0 && (job_str[len - 1] == ' ' || job_str[len - 1] == '\t')
+        ) {
+          --len;
+        }
+
+        if (len > 0) {
+          char* job_line = strndup(job_str, len);
+          if (!job_line) {
+            perror("strndup");
+            _exit(1);
+          }
+          vtsh_start_background_job(job_line);
+        }
+
+        ++ptr;
+        job_start = ptr;
+        continue;
+      }
+
+      ++ptr;
+    }
+
+    if (has_bg_amp) {
+      // tail after &
+      const char* tail = job_start;
+      while (*tail == ' ' || *tail == '\t') {
+        ++tail;
+      }
+
+      if (*tail != '\0') {
+        char* tail_copy = strdup(tail);
+        if (!tail_copy) {
+          perror("strdup");
+          _exit(1);
+        }
+        int ret_code = vtsh_run_segment_foreground(
+            tail_copy, i, parts_n, parts, &last_status
+        );
+        free(tail_copy);
+        if (ret_code < 0) {
+          free(seg0);
+          free(parts);
+          return -1;
+        }
+      }
+
+      free(seg0);
       continue;
     }
 
-    vtsh_handle_redir_cmd(&cmd, &last_status);
+    // no &
+    int ret_code =
+        vtsh_run_segment_foreground(seg, i, parts_n, parts, &last_status);
     free(seg0);
+    if (ret_code < 0) {
+      free(parts);
+      return -1;
+    }
   }
   free(parts);
+
+  vtsh_check_background_jobs();
+
   return 0;
 }
