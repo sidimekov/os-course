@@ -13,6 +13,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <ctype.h>
 
 #include "vtsh.h"
 #include "vtsh_internal.h"
@@ -60,6 +61,52 @@ static int builtin_cd(char** argv, bool t_flag, double* elapsed_sec) {
   }
   return (ret_code == 0) ? 0 : 1;
 }
+
+static void vtsh_expand_env_vars(char** argv, int argc) {
+  if (!argv || argc <= 0) {
+    return;
+  }
+
+  for (int i = 0; i < argc; ++i) {
+    char* str = argv[i];
+    if (!str || str[0] != '$') {
+      continue;
+    }
+
+    const char* name = str + 1;
+    if (*name == '\0') {
+      continue;
+    }
+
+    // valid env var name
+    bool valid = true;
+    for (const unsigned char* ptr = (const unsigned char*)name; *ptr; ++ptr) {
+      if (!isalnum(*ptr) && *ptr != '_') {
+        valid = false;
+        break;
+      }
+    }
+    if (!valid) {
+      continue;
+    }
+
+    const char* val = getenv(name);
+
+    free(str);
+
+    if (!val) {
+      argv[i] = strdup("");
+    } else {
+      argv[i] = strdup(val);
+    }
+
+    if (!argv[i]) {
+      perror("strdup");
+      _exit(1);
+    }
+  }
+}
+
 
 static int vtsh_child_main(void* arg) {
   char** argv = (char**)arg;
@@ -124,7 +171,6 @@ static int run_external(char** argv, bool t_flag, double* elapsed_sec) {
     *elapsed_sec = t_flag ? vtsh_timespec_diff_sec(time0, time1) : 0.0;
   }
 
-  // что это
   if (WIFEXITED(status)) {
     return WEXITSTATUS(status);
   }
@@ -134,7 +180,6 @@ static int run_external(char** argv, bool t_flag, double* elapsed_sec) {
   return VTSH_SIGNAL_EXIT_BASE;
 }
 
-// что делает
 int vtsh_run_one(char** argv, int argc, double* elapsed_sec, bool* is_time) {
   if (!argv || !argv[0]) {
     if (is_time) {
@@ -154,6 +199,8 @@ int vtsh_run_one(char** argv, int argc, double* elapsed_sec, bool* is_time) {
     }
     return 0;
   }
+
+  vtsh_expand_env_vars(argv, argc);
 
   if (strcmp(argv[0], "exit") == 0) {
     return VTSH_EXIT_CODE;
