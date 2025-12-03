@@ -72,20 +72,29 @@ static int vtsh_child_main(void* arg) {
 }
 
 // simple wrapper to run fn(arg) in child created by clone3
-pid_t vtsh_spawn_fn(int (*func)(void*), void* arg) {
+pid_t vtsh_spawn_fn(int (*func)(void *), void *arg) {
+#ifdef SYS_clone3
   struct clone_args args;
   memset(&args, 0, sizeof(args));
   args.exit_signal = SIGCHLD;
 
   pid_t pid = (pid_t)syscall(SYS_clone3, &args, sizeof(args));
   if (pid == -1) {
-    return -1;
+    return -1; 
   }
   if (pid == 0) {
     int ret_code = func(arg);
     _exit(ret_code);
   }
   return pid;
+#else
+  pid_t pid = fork();
+  if (pid == 0) {
+    int ret_code = func(arg);
+    _exit(ret_code);
+  }
+  return pid;
+#endif
 }
 
 static int run_external(char** argv, bool t_flag, double* elapsed_sec) {
