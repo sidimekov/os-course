@@ -75,7 +75,6 @@ static int vtsh_child_main(void* arg) {
 pid_t vtsh_spawn_fn(int (*func)(void *), void *arg) {
   pid_t pid = -1;
 
-#ifdef SYS_clone3
   struct clone_args args;
   memset(&args, 0, sizeof(args));
   args.exit_signal = SIGCHLD;
@@ -85,9 +84,6 @@ pid_t vtsh_spawn_fn(int (*func)(void *), void *arg) {
   if (pid == -1 && (errno == ENOSYS || errno == EPERM)) {
     pid = fork();
   }
-#else
-  pid = fork();
-#endif
 
   if (pid < 0) {
     return -1;
