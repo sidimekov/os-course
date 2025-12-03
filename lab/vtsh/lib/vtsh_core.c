@@ -1,10 +1,11 @@
-#include "vtsh.h"
-#include "vtsh_internal.h"
-
+#include <ctype.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "vtsh.h"
+#include "vtsh_internal.h"
 
 void vtsh_print_prompt(void) {
   if (fprintf(stdout, "vtsh> ") < 0) {
@@ -81,7 +82,6 @@ static int vtsh_handle_simple_cmd(
 }
 
 static int vtsh_handle_redir_cmd(VtshCmd* cmd, int* out_status) {
-
   // Если парсер вернул пустую команду (syntax error),
   // то сообщение уже напечатано, статус vtsh должен быть 0
   if (cmd->argv == NULL) {
@@ -121,8 +121,56 @@ static int vtsh_handle_redir_cmd(VtshCmd* cmd, int* out_status) {
   return 0;
 }
 
+// execute on bg without ret code
+static int vtsh_bg_child_main(void* arg) {
+  char* line = arg;
+  (void)vtsh_execute_line(line);
+  free(line);
+  return 0;
+}
+
 int vtsh_execute_line(const char* line) {
   if (!line) {
+    return 0;
+  }
+
+  // & handle
+  const char* end = line + strlen(line);
+
+  while (end > line && isspace((unsigned char)end[-1])) {
+    --end;
+  }
+
+  bool background = false;
+  if (end > line && end[-1] == '&') {
+    background = true;
+    --end;  // remove &
+
+    while (end > line && isspace((unsigned char)end[-1])) {
+      --end;
+    }
+  }
+
+  if (background) {
+    size_t clean_len = (size_t)(end - line);
+    char* clean_line = malloc(clean_len + 1);
+    if (!clean_line) {
+      perror("malloc");
+      return 0;
+    }
+
+    memcpy(clean_line, line, clean_len);
+    clean_line[clean_len] = '\0';
+
+    pid_t pid = vtsh_spawn_fn(vtsh_bg_child_main, clean_line);
+    if (pid < 0) {
+      perror("vtsh_spawn_fn");
+      free(clean_line);
+      return 0;
+    }
+
+    printf("[bg] %d\n", pid);
+
     return 0;
   }
 
