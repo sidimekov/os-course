@@ -2,6 +2,7 @@
 
 #define _GNU_SOURCE
 
+#include <ctype.h>
 #include <errno.h>
 #include <linux/sched.h>  // struct clone_args
 #include <sched.h>
@@ -13,7 +14,6 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
-#include <ctype.h>
 
 #include "vtsh.h"
 #include "vtsh_internal.h"
@@ -107,7 +107,6 @@ static void vtsh_expand_env_vars(char** argv, int argc) {
   }
 }
 
-
 static int vtsh_child_main(void* arg) {
   char** argv = (char**)arg;
 
@@ -119,7 +118,7 @@ static int vtsh_child_main(void* arg) {
 }
 
 // simple wrapper to run fn(arg) in child created by clone3
-pid_t vtsh_spawn_fn(int (*func)(void *), void *arg) {
+pid_t vtsh_spawn_fn(int (*func)(void*), void* arg) {
   pid_t pid = -1;
 
   struct clone_args args;
@@ -162,7 +161,6 @@ static int run_external(char** argv, bool t_flag, double* elapsed_sec) {
     perror("waitpid");
     return VTSH_EXEC_ERROR;
   }
-  
 
   if (t_flag && clock_gettime(CLOCK_MONOTONIC, &time1) != 0) {
     perror("clock_gettime");

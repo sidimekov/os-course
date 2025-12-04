@@ -13,7 +13,8 @@ enum {
   VTSH_GROWTH_FACTOR = 2,
   VTSH_EXEC_ERROR = 127,
   VTSH_SIGNAL_EXIT_BASE = 128,
-  VTSH_REDIRS_CHMOD_OPEN = 0666
+  VTSH_REDIRS_CHMOD_OPEN = 0666,
+  VTSH_STRTO_BASE = 10
 };
 
 static const double VTSH_NSEC_PER_SEC = 1e9;
@@ -25,6 +26,12 @@ typedef struct {
   char* in_path;
   char* out_path;
   bool append;
+
+  char* err_path;
+  bool err_append;      // 2>>file
+  bool err_to_out;      // 2>&1
+  bool out_to_err;      // 1>&2
+  bool err_before_out;  // stderr redit встретился до stdout redir
 } VtshCmd;
 
 typedef struct {

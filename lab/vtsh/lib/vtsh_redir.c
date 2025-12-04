@@ -1,8 +1,10 @@
 // Функции связанные с VtshCmd, редиректами и пайпами
 #define _GNU_SOURCE
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
@@ -15,10 +17,10 @@
 
 // для тестов вывод IO Error
 static void vtsh_io_error_and_exit(void) {
-  if (printf("I/O error\n") < 0) {
-    perror("printf");
+  if (fprintf(stderr, "I/O error\n") < 0) {
+    perror("fprintf");
   }
-  if (fflush(stdout) != 0) {
+  if (fflush(stderr) != 0) {
     perror("fflush");
   }
   _exit(1);
@@ -26,7 +28,7 @@ static void vtsh_io_error_and_exit(void) {
 
 // Для теста syntax error
 static VtshCmd vtsh_syntax_error_finish(
-    VtshCmd cmd, char **argv, char **clean, int clean_i
+    VtshCmd cmd, char** argv, char** clean, int clean_i
 ) {
   if (printf("Syntax error\n") < 0) {
     perror("printf");
@@ -37,7 +39,7 @@ static VtshCmd vtsh_syntax_error_finish(
 
   // освободить argv из vtsh_parse_argv
   if (argv) {
-    for (char **ptr = argv; *ptr; ++ptr) {
+    for (char** ptr = argv; *ptr; ++ptr) {
       free(*ptr);
     }
     free(argv);
@@ -53,10 +55,17 @@ static VtshCmd vtsh_syntax_error_finish(
 
   free(cmd.in_path);
   free(cmd.out_path);
+  free(cmd.err_path);
+
   cmd.argv = NULL;
   cmd.in_path = NULL;
   cmd.out_path = NULL;
+  cmd.err_path = NULL;
   cmd.append = false;
+  cmd.err_append = false;
+  cmd.err_to_out = false;
+  cmd.out_to_err = false;
+  cmd.err_before_out = false;
   return cmd;
 }
 
@@ -121,7 +130,7 @@ static char* vtsh_take_fname(
     return NULL;
   }
 
-  const char *next = argv[*idx + 1];
+  const char* next = argv[*idx + 1];
   if (next[0] == '<' || next[0] == '>') {
     // < >hello не пропускать как в одном тесте
     return NULL;
@@ -134,6 +143,42 @@ static char* vtsh_take_fname(
     _exit(1);
   }
   return name;
+}
+
+// plain как номер дескриптора
+// если успешно - return true и значение в *out_fd, plain_len обнуляется
+static bool vtsh_plain_take_fd(char* plain, size_t* plain_len, int* out_fd) {
+  if (plain == NULL || plain_len == NULL || out_fd == NULL) {
+    return false;
+  }
+  if (*plain_len == 0) {
+    return false;
+  }
+
+  for (size_t i = 0; i < *plain_len; ++i) {
+    if (!isdigit((unsigned char)plain[i])) {
+      return false;
+    }
+  }
+
+  char buf[32];
+  if (*plain_len >= sizeof(buf)) {
+    return false;
+  }
+  memcpy(buf, plain, *plain_len);
+  buf[*plain_len] = '\0';
+
+  errno = 0;
+  char* endptr = NULL;
+  long val = strtol(buf, &endptr, VTSH_STRTO_BASE);
+  if (errno != 0 || endptr == buf || *endptr != '\0' || val < 0 ||
+      val > INT_MAX) {
+    return false;
+  }
+
+  *out_fd = (int)val;
+  *plain_len = 0;
+  return true;
 }
 
 VtshCmd vtsh_parse_cmd_with_redirs(const char* seg) {
@@ -164,8 +209,12 @@ VtshCmd vtsh_parse_cmd_with_redirs(const char* seg) {
     while (ptr < tok_len) {
       char chr = tok[ptr];
       if (chr == '>' || chr == '<') {
-        // plain буфер в clean argv
-        vtsh_plain_flush_to_clean(&plain, &plain_len, &clean, &clean_i);
+        // попытка вытащить номер дескриптора перед оператором (например "2>")
+        int fd_hint = -1;
+        if (!vtsh_plain_take_fd(plain, &plain_len, &fd_hint)) {
+          // не номер fd
+          vtsh_plain_flush_to_clean(&plain, &plain_len, &clean, &clean_i);
+        }
 
         bool is_out = (chr == '>');
         bool append = false;
@@ -175,27 +224,105 @@ VtshCmd vtsh_parse_cmd_with_redirs(const char* seg) {
           ++ptr;
         }
 
-        // собрать имя файла из этого же токена до следующего < или >
-        char* fname = vtsh_take_fname(tok, tok_len, &ptr, argv, &i, argc);
+        // проверка на 2>&1 и 1>&2 без пробелов
+        if (ptr < tok_len && tok[ptr] == '&') {
+          ++ptr;
 
-        // нет имени файла => синтаксическая ошибка редиректа
-        // это для теста
+          // номер целевого дескриптора
+          size_t fd_start = ptr;
+          while (ptr < tok_len && tok[ptr] >= '0' && tok[ptr] <= '9') {
+            ++ptr;
+          }
+          size_t fd_len = ptr - fd_start;
+          if (!is_out || fd_len == 0 || append) {
+            cmd = vtsh_syntax_error_finish(cmd, argv, clean, clean_i);
+            return cmd;
+          }
+
+          char buf[32];
+          if (fd_len >= sizeof(buf)) {
+            cmd = vtsh_syntax_error_finish(cmd, argv, clean, clean_i);
+            return cmd;
+          }
+          memcpy(buf, tok + fd_start, fd_len);
+          buf[fd_len] = '\0';
+
+          errno = 0;
+          char* endptr = NULL;
+          long dest_fd = strtol(buf, &endptr, VTSH_STRTO_BASE);
+          if (errno != 0 || endptr == buf || *endptr != '\0' || dest_fd < 0 ||
+              dest_fd > INT_MAX) {
+            cmd = vtsh_syntax_error_finish(cmd, argv, clean, clean_i);
+            return cmd;
+          }
+
+          int src_fd = -1;
+          if (fd_hint >= 0) {
+            src_fd = fd_hint;
+          } else {
+            src_fd = is_out ? STDOUT_FILENO : STDIN_FILENO;
+          }
+
+          // 2>&1 и 1>&2
+          if (src_fd == STDERR_FILENO && dest_fd == STDOUT_FILENO) {
+            if (cmd.err_path != NULL || cmd.err_to_out || cmd.err_append) {
+              cmd = vtsh_syntax_error_finish(cmd, argv, clean, clean_i);
+              return cmd;
+            }
+            cmd.err_to_out = true;
+          } else if (src_fd == STDOUT_FILENO && dest_fd == STDERR_FILENO) {
+            if (cmd.out_path != NULL || cmd.out_to_err || cmd.append) {
+              cmd = vtsh_syntax_error_finish(cmd, argv, clean, clean_i);
+              return cmd;
+            }
+            cmd.out_to_err = true;
+          } else {
+            cmd = vtsh_syntax_error_finish(cmd, argv, clean, clean_i);
+            return cmd;
+          }
+
+          continue;  // след символ токена
+        }
+
+        // redir в файл
+        char* fname = vtsh_take_fname(tok, tok_len, &ptr, argv, &i, argc);
         if (fname == NULL) {
           cmd = vtsh_syntax_error_finish(cmd, argv, clean, clean_i);
           return cmd;
         }
 
-
-        // запись редирект
         if (is_out) {
-          if (cmd.out_path != NULL) {
+          int target_fd = (fd_hint >= 0) ? fd_hint : STDOUT_FILENO;
+
+          if (target_fd == STDOUT_FILENO) {
+            if (cmd.out_path != NULL) {
+              free(fname);
+              cmd = vtsh_syntax_error_finish(cmd, argv, clean, clean_i);
+              return cmd;
+            }
+            cmd.out_path = fname;
+            cmd.append = append;
+          } else if (target_fd == STDERR_FILENO) {
+            if (cmd.err_path != NULL) {
+              free(fname);
+              cmd = vtsh_syntax_error_finish(cmd, argv, clean, clean_i);
+              return cmd;
+            }
+            cmd.err_path = fname;
+            cmd.err_append = append;
+          } else {
             free(fname);
             cmd = vtsh_syntax_error_finish(cmd, argv, clean, clean_i);
             return cmd;
           }
-          cmd.out_path = fname;
-          cmd.append = append;
         } else {
+          // input redir: <file or 0<file
+          int target_fd = (fd_hint >= 0) ? fd_hint : STDIN_FILENO;
+          if (target_fd != STDIN_FILENO) {
+            free(fname);
+            cmd = vtsh_syntax_error_finish(cmd, argv, clean, clean_i);
+            return cmd;
+          }
           if (cmd.in_path != NULL) {
             free(fname);
             cmd = vtsh_syntax_error_finish(cmd, argv, clean, clean_i);
@@ -222,40 +349,92 @@ VtshCmd vtsh_parse_cmd_with_redirs(const char* seg) {
   }
   clean[clean_i] = NULL;
 
-  // освобождается только массив argv, строки в нём уже не нужны
-  for (char **ptr = argv; *ptr; ++ptr) {
+  for (char** ptr = argv; *ptr; ++ptr) {
     free(*ptr);
   }
   free(argv);
 
   cmd.argv = clean;
+
+  // stdout раньше по умолчанию
+  cmd.err_before_out = false;
+
+  // есть и stderr-файл и stdout-файл - смотрим какой редирект был первым
+  if (cmd.err_path && cmd.out_path) {
+    const char* ptr = seg;
+    while (*ptr != '\0') {
+      if (ptr[0] == '2' && ptr[1] == '>') {
+        cmd.err_before_out = true;
+        break;
+      }
+      if (ptr[0] == '>') {
+        cmd.err_before_out = false;
+        break;
+      }
+      ++ptr;
+    }
+  }
+
   return cmd;
 }
 
+static void vtsh_apply_one_file_redir(
+    const char* path, bool append, int dest_fd
+) {
+  uint flags = O_WRONLY | O_CREAT;
+  if (append) {
+    flags |= O_APPEND;
+  } else {
+    flags |= O_TRUNC;
+  }
+  int fdes = open(path, (int)flags, VTSH_REDIRS_CHMOD_OPEN);
+  if (fdes < 0) {
+    vtsh_io_error_and_exit();
+  }
+  if (dup2(fdes, dest_fd) < 0) {
+    close(fdes);
+    vtsh_io_error_and_exit();
+  }
+  close(fdes);
+}
+
 static void vtsh_apply_redirs(const VtshCmd* cmd) {
+  if (cmd == NULL) {
+    return;
+  }
+
+  // 2>&1 / 1>&2
+  if (cmd->err_to_out) {
+    if (dup2(STDOUT_FILENO, STDERR_FILENO) < 0) {
+      vtsh_io_error_and_exit();
+    }
+  }
+  if (cmd->out_to_err) {
+    if (dup2(STDERR_FILENO, STDOUT_FILENO) < 0) {
+      vtsh_io_error_and_exit();
+    }
+  }
+
+  if (cmd->err_before_out) {
+    // 2>.. потом >..
+    vtsh_apply_one_file_redir(cmd->err_path, cmd->err_append, STDERR_FILENO);
+    vtsh_apply_one_file_redir(cmd->out_path, cmd->append, STDOUT_FILENO);
+  } else {
+    if (cmd->out_path) {
+      vtsh_apply_one_file_redir(cmd->out_path, cmd->append, STDOUT_FILENO);
+    }
+    if (cmd->err_path) {
+      vtsh_apply_one_file_redir(cmd->err_path, cmd->err_append, STDERR_FILENO);
+    }
+  }
+
+  // stdin
   if (cmd->in_path) {
     int fdes = open(cmd->in_path, O_RDONLY);
     if (fdes < 0) {
       vtsh_io_error_and_exit();
     }
     if (dup2(fdes, STDIN_FILENO) < 0) {
-      close(fdes);
-      vtsh_io_error_and_exit();
-    }
-    close(fdes);
-  }
-  if (cmd->out_path) {
-    uint flags = O_WRONLY | O_CREAT;
-    if (cmd->append) {
-      flags |= O_APPEND;
-    } else {
-      flags |= O_TRUNC;
-    }
-    int fdes = open(cmd->out_path, (int)flags, VTSH_REDIRS_CHMOD_OPEN);
-    if (fdes < 0) {
-      vtsh_io_error_and_exit();
-    }
-    if (dup2(fdes, STDOUT_FILENO) < 0) {
       close(fdes);
       vtsh_io_error_and_exit();
     }
@@ -277,7 +456,9 @@ void vtsh_cmd_free(VtshCmd* cmd) {
   }
   free(cmd->in_path);
   free(cmd->out_path);
+  free(cmd->err_path);
 }
+
 void vtsh_cmds_free(VtshCmd* cmds, size_t n) {
   if (!cmds) {
     return;
@@ -505,7 +686,7 @@ int vtsh_run_single_with_redirs(
     perror("clock_gettime");
   }
 
-   pid_t pid = vtsh_spawn_fn(vtsh_single_redir_child, cmd);
+  pid_t pid = vtsh_spawn_fn(vtsh_single_redir_child, cmd);
   if (pid < 0) {
     perror("clone3");
     return VTSH_EXEC_ERROR;

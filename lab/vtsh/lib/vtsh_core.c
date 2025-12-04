@@ -238,6 +238,28 @@ static int vtsh_run_segment_foreground(
   return 0;
 }
 
+// отличать & от 2>&1 например
+static bool vtsh_is_redir_ampersand(const char* seg, const char* amp_pos) {
+  if (!seg || !amp_pos) {
+    return false;
+  }
+  if (amp_pos == seg) {
+    return false;
+  }
+
+  const char* prev = amp_pos - 1;
+  if (*prev != '>') {
+    return false;
+  }
+
+  const char* next = amp_pos + 1;
+  if (*next < '0' || *next > '9') {
+    return false;
+  }
+
+  return true;
+}
+
 int vtsh_execute_line(const char* line) {
   if (!line) {
     return 0;
@@ -287,11 +309,17 @@ int vtsh_execute_line(const char* line) {
       }
 
       if (quotes == 0 && *ptr == '&') {
+        if (vtsh_is_redir_ampersand(seg, ptr)) {
+          ++ptr;
+          continue;
+        }
+
         has_bg_amp = true;
 
         const char* job_str = job_start;
         size_t len = (size_t)(ptr - job_start);
 
+        // trim слева и справа
         while (len > 0 && (*job_str == ' ' || *job_str == '\t')) {
           ++job_str;
           --len;
