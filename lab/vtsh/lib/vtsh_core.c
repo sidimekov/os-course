@@ -223,7 +223,12 @@ static int vtsh_run_segment_foreground(
   }
 
   VtshCmd cmd = vtsh_parse_cmd_with_redirs(seg);
-  bool has_redir = (cmd.in_path != NULL) || (cmd.out_path != NULL);
+  bool has_redir =
+      (cmd.in_path   != NULL) ||
+      (cmd.out_path  != NULL) ||
+      (cmd.err_path  != NULL) ||
+      cmd.err_to_out ||
+      cmd.out_to_err;
 
   if (!has_redir) {
     int ret_code =
