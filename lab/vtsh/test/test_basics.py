@@ -32,7 +32,7 @@ class TestShellBasics(BaseShellTest):
         self.execute("cat\nhello\nworld", "hello\nworld")
 
     def test_nested_shells(self):
-        self.execute("./shell\necho hi\n./shell\necho hello", "hi\nhello")
+        self.execute("../build/bin/vtsh\necho hi\n../build/bin/vtsh\necho hello", "hi\nhello")
 
     def test_invalid_paths(self):
         self.execute("cat /sys/proc/foo/bar", "")
