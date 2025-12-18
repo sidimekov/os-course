@@ -1,11 +1,14 @@
+#define _GNU_SOURCE
+
 #include "vtpc.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-enum { VTPC_MAX_FILES=64 };
+enum { VTPC_MAX_FILES = 64 };
 
 typedef struct {
   int used;
@@ -49,7 +52,7 @@ int vtpc_open(const char* path, int mode, int access) {
     errno = EINVAL;
     return -1;
   }
-  
+
   int vfd = vtpc_alloc_slot();
   if (vfd < 0) {
     return -1;
@@ -76,7 +79,37 @@ int vtpc_open(const char* path, int mode, int access) {
 }
 
 int vtpc_close(int fd) {
-  return close(fd);
+  VtpcFile* f = vtpc_get_file(fd);
+  if (!f) {
+    return -1;
+  }
+
+  if (close(f->os_fd) != 0) {
+    return -1;
+  }
+
+  vtpc_free_slot(fd);
+  return 0;
+}
+
+off_t vtpc_lseek(int fd, off_t offset, int whence) {
+  VtpcFile* f = vtpc_get_file(fd);
+  if (!f) {
+    return (off_t)-1;
+  }
+
+  // по заданию только абсолютное позиционирование
+  if (whence != SEEK_SET) {
+    errno = EINVAL;
+    return (off_t)-1;
+  }
+  if (offset < 0) {
+    errno = EINVAL;
+    return (off_t)-1;
+  }
+
+  f->pos = offset;
+  return offset;
 }
 
 ssize_t vtpc_read(int fd, void* buf, size_t count) {
@@ -85,10 +118,6 @@ ssize_t vtpc_read(int fd, void* buf, size_t count) {
 
 ssize_t vtpc_write(int fd, const void* buf, size_t count) {
   return write(fd, buf, count);
-}
-
-off_t vtpc_lseek(int fd, off_t offset, int whence) {
-  return lseek(fd, offset, whence);
 }
 
 int vtpc_fsync(int fd) {
