@@ -7,7 +7,14 @@
 #include "vtpc_internal.h"
 
 int vtpc_io_open_direct(const char* path, int mode, int access) {
-  int open_mode = mode | O_DIRECT;
+  int open_mode = mode;
+
+  int acc = open_mode & O_ACCMODE;
+  if (acc == O_WRONLY) {
+    open_mode = (open_mode & ~O_ACCMODE) | O_RDWR;
+  }
+
+  open_mode |= O_DIRECT;
 
   int os_fd;
   if (open_mode & O_CREAT) {
