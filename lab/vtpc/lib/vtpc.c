@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include "vtpc_internal.h"
 
@@ -41,16 +42,19 @@ int vtpc_open(const char* path, int mode, int access) {
 int vtpc_close(int fd) {
   VtpcFile* f = vtpc_fd_get(fd);
   if (!f) {
+    errno = EBADF;
     return -1;
   }
 
-  if (vtpc_fsync(fd) != 0) {
-    return -1;
-  }
+  const int os_fd = f->os_fd;
+
+  if ((f->mode & O_ACCMODE) != O_RDONLY) {
+    if (vtpc_fsync(fd) != 0) return -1;
+}
 
   vtpc_cache_forget_file(fd);
 
-  if (close(f->os_fd) != 0) {
+  if (close(os_fd) != 0) {
     return -1;
   }
 
