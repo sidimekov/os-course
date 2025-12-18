@@ -18,6 +18,29 @@ CachePage* vtpc_cache_find(int vfd, off_t page_index) {
   return NULL;
 }
 
+int vtpc_cache_flush_page(CachePage* p) {
+  if (!p || !p->used)
+    return 0;
+  if (!p->dirty)
+    return 0;
+
+  VtpcFile* f = vtpc_fd_get(p->vfd);
+  if (!f) {
+    return -1;
+  }
+
+  ssize_t w = vtpc_io_pwrite_page(f->os_fd, p->data, p->page_index);
+  if (w < 0)
+    return -1;
+  if (w != (ssize_t)VTPC_PAGE_SIZE) {
+    errno = EIO;
+    return -1;
+  }
+
+  p->dirty = 0;
+  return 0;
+}
+
 static CachePage* cache_pick_slot_mru(void) {
   for (int i = 0; i < VTPC_CACHE_PAGES; ++i) {
     if (!g_cache[i].used)
@@ -33,17 +56,22 @@ static CachePage* cache_pick_slot_mru(void) {
     }
   }
 
-  g_cache[victim].used = 0;
-  g_cache[victim].vfd = -1;
-  g_cache[victim].page_index = 0;
-  g_cache[victim].valid_bytes = 0;
-  g_cache[victim].dirty = 0;
-  g_cache[victim].last_use = 0;
+  CachePage* v = &g_cache[victim];
 
-  return &g_cache[victim];
+  if (vtpc_cache_flush_page(v) != 0) {
+    return NULL;
+  }
+
+  v->used = 0;
+  v->vfd = -1;
+  v->page_index = 0;
+  v->dirty = 0;
+  v->last_use = 0;
+
+  return v;
 }
 
-CachePage* vtpc_cache_get_or_load(int vfd, int os_fd, off_t page_index) {
+CachePage* vtpc_cache_get_or_load(int vfd, int os_fd, off_t page_index, off_t file_size) {
   CachePage* p = vtpc_cache_find(vfd, page_index);
   if (p) {
     cache_touch(p);
@@ -51,6 +79,9 @@ CachePage* vtpc_cache_get_or_load(int vfd, int os_fd, off_t page_index) {
   }
 
   p = cache_pick_slot_mru();
+  if (!p) {
+    return NULL;
+  }
 
   if (!p->data) {
     void* mem = NULL;
@@ -70,11 +101,68 @@ CachePage* vtpc_cache_get_or_load(int vfd, int os_fd, off_t page_index) {
   p->used = 1;
   p->vfd = vfd;
   p->page_index = page_index;
-  p->valid_bytes = (size_t)r;
   p->dirty = 0;
   cache_touch(p);
 
   return p;
+}
+
+CachePage* vtpc_cache_get_for_write(
+    int vfd, int os_fd, off_t page_index, off_t file_size
+) {
+  CachePage* p = vtpc_cache_find(vfd, page_index);
+  if (p) {
+    cache_touch(p);
+    return p;
+  }
+
+  p = cache_pick_slot_mru();
+  if (!p) {
+    return NULL;
+  }
+
+  if (!p->data) {
+    void* mem = NULL;
+    int rc = posix_memalign(&mem, VTPC_ALIGNMENT, (size_t)VTPC_PAGE_SIZE);
+    if (rc != 0) {
+      errno = rc;
+      return NULL;
+    }
+    p->data = mem;
+  }
+
+  off_t page_start = page_index * (off_t)VTPC_PAGE_SIZE;
+  if (page_start < file_size) {
+    ssize_t r = vtpc_io_pread_page(os_fd, p->data, page_index);
+    if (r < 0)
+      return NULL;
+    if (r < (ssize_t)VTPC_PAGE_SIZE) {
+      memset(
+          (unsigned char*)p->data + r, 0, (size_t)VTPC_PAGE_SIZE - (size_t)r
+      );
+    }
+  } else {
+    // полностью за текущим EOF — как “дырка”: нули
+    memset(p->data, 0, (size_t)VTPC_PAGE_SIZE);
+  }
+
+  p->used = 1;
+  p->vfd = vfd;
+  p->page_index = page_index;
+  p->dirty = 0;
+  cache_touch(p);
+
+  return p;
+}
+
+int vtpc_cache_flush_file(int vfd) {
+  for (int i = 0; i < VTPC_CACHE_PAGES; ++i) {
+    if (g_cache[i].used && g_cache[i].vfd == vfd) {
+      if (vtpc_cache_flush_page(&g_cache[i]) != 0)
+        return -1;
+    }
+  }
+  return 0;
 }
 
 void vtpc_cache_forget_file(int vfd) {
@@ -83,7 +171,6 @@ void vtpc_cache_forget_file(int vfd) {
       g_cache[i].used = 0;
       g_cache[i].vfd = -1;
       g_cache[i].page_index = 0;
-      g_cache[i].valid_bytes = 0;
       g_cache[i].dirty = 0;
       g_cache[i].last_use = 0;
     }

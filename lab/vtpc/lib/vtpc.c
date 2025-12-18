@@ -27,12 +27,24 @@ int vtpc_open(const char* path, int mode, int access) {
   g_files[vfd].mode = mode;
   g_files[vfd].access = access;
 
+  off_t sz = vtpc_io_get_size(os_fd);
+  if (sz < 0) {
+    close(os_fd);
+    vtpc_fd_free(vfd);
+    return -1;
+  }
+  g_files[vfd].size = sz;
+
   return vfd;
 }
 
 int vtpc_close(int fd) {
   VtpcFile* f = vtpc_fd_get(fd);
   if (!f) {
+    return -1;
+  }
+
+  if (vtpc_fsync(fd) != 0) {
     return -1;
   }
 
@@ -93,7 +105,7 @@ ssize_t vtpc_read(int fd, void* buf, size_t count) {
     off_t page_index = cur / (off_t)VTPC_PAGE_SIZE;
     size_t page_off = (size_t)(cur % (off_t)VTPC_PAGE_SIZE);
 
-    CachePage* p = vtpc_cache_get_or_load(fd, f->os_fd, page_index);
+    CachePage* p = vtpc_cache_get_or_load(fd, f->os_fd, page_index, f->size);
     if (!p) {
       if (total > 0) {
         break;
@@ -101,15 +113,17 @@ ssize_t vtpc_read(int fd, void* buf, size_t count) {
       return -1;
     }
 
-    if (p->valid_bytes == 0) {
+    off_t page_start = page_index * (off_t)VTPC_PAGE_SIZE;
+    size_t page_limit = (size_t)VTPC_PAGE_SIZE;
+    if (page_start + (off_t)page_limit > f->size) {
+      page_limit = (size_t)(f->size - page_start);
+    }
+
+    if (page_off >= page_limit) {
       break;
     }
 
-    if (page_off >= p->valid_bytes) {
-      break;
-    }
-
-    size_t avail = p->valid_bytes - page_off;
+    size_t avail = page_limit - page_off;
     size_t need = count - total;
     size_t chunk = (avail < need) ? avail : need;
 
@@ -126,9 +140,70 @@ ssize_t vtpc_read(int fd, void* buf, size_t count) {
 }
 
 ssize_t vtpc_write(int fd, const void* buf, size_t count) {
-  return write(fd, buf, count);
+  VtpcFile* f = vtpc_fd_get(fd);
+  if (!f) {
+    return -1;
+  }
+
+  if (!buf && count != 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (count == 0) {
+    return 0;
+  }
+
+  const unsigned char* in = (const unsigned char*)buf;
+  size_t total = 0;
+
+  while (total < count) {
+    off_t cur = f->pos;
+    off_t page_index = cur / (off_t)VTPC_PAGE_SIZE;
+    size_t page_off = (size_t)(cur % (off_t)VTPC_PAGE_SIZE);
+
+    CachePage* p = vtpc_cache_get_for_write(fd, f->os_fd, page_index, f->size);
+    if (!p) {
+      if (total > 0) {
+        break;
+      }
+      return -1;
+    }
+
+    size_t available = (size_t)VTPC_PAGE_SIZE - page_off;
+    size_t need = count - total;
+    size_t chunk = (available < need) ? available : need;
+
+    memcpy((unsigned char*)p->data + page_off, in + total, chunk);
+    p->dirty = 1;
+    p->last_use = ++g_use_tick;
+
+    total += chunk;
+    f->pos += (off_t)chunk;
+
+    if (f->pos > f->size) {
+      f->size = f->pos;
+    }
+  }
+
+  return (ssize_t)total;
 }
 
 int vtpc_fsync(int fd) {
-  return fsync(fd);
+  VtpcFile* f = vtpc_fd_get(fd);
+  if (!f)
+    return -1;
+
+  if (vtpc_cache_flush_file(fd) != 0) {
+    return -1;
+  }
+
+  if (vtpc_io_truncate(f->os_fd, f->size) != 0) {
+    return -1;
+  }
+
+  if (vtpc_io_fsync(f->os_fd) != 0) {
+    return -1;
+  }
+
+  return 0;
 }
