@@ -71,7 +71,9 @@ static CachePage* cache_pick_slot_mru(void) {
   return v;
 }
 
-CachePage* vtpc_cache_get_or_load(int vfd, int os_fd, off_t page_index, off_t file_size) {
+CachePage* vtpc_cache_get_or_load(
+    int vfd, int os_fd, off_t page_index, off_t file_size
+) {
   CachePage* p = vtpc_cache_find(vfd, page_index);
   if (p) {
     cache_touch(p);
@@ -96,6 +98,9 @@ CachePage* vtpc_cache_get_or_load(int vfd, int os_fd, off_t page_index, off_t fi
   ssize_t r = vtpc_io_pread_page(os_fd, p->data, page_index);
   if (r < 0) {
     return NULL;
+  }
+  if (r < (ssize_t)VTPC_PAGE_SIZE) {
+    memset((unsigned char*)p->data + r, 0, (size_t)VTPC_PAGE_SIZE - (size_t)r);
   }
 
   p->used = 1;

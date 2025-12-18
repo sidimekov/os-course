@@ -87,12 +87,15 @@ ssize_t vtpc_read(int fd, void* buf, size_t count) {
     return 0;
   }
 
-  off_t file_size = vtpc_io_get_size(f->os_fd);
-  if (file_size < 0) {
+  off_t disk_size = vtpc_io_get_size(f->os_fd);
+  if (disk_size < 0)
     return -1;
+
+  if (disk_size > f->size) {
+    f->size = disk_size;
   }
 
-  if (f->pos >= file_size) {
+  if (f->pos >= f->size) {
     return 0;
   }
 
@@ -132,8 +135,9 @@ ssize_t vtpc_read(int fd, void* buf, size_t count) {
     total += chunk;
     f->pos += (off_t)chunk;
 
-    if (f->pos >= file_size)
+    if (f->pos >= f->size) {
       break;
+    }
   }
 
   return (ssize_t)total;
