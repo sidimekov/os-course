@@ -1,51 +1,10 @@
-#define _GNU_SOURCE
-
 #include "vtpc.h"
 
 #include <errno.h>
-#include <fcntl.h>
-#include <stddef.h>
-#include <sys/types.h>
+#include <string.h>
 #include <unistd.h>
 
-enum { VTPC_MAX_FILES = 64 };
-
-typedef struct {
-  int used;
-  int os_fd;
-  off_t pos;
-  int mode;
-  int access;
-} VtpcFile;
-
-static VtpcFile vtpc_files[VTPC_MAX_FILES];
-
-// helpers
-
-static int vtpc_alloc_slot(void) {
-  for (int i = 0; i < VTPC_MAX_FILES; i++) {
-    if (!vtpc_files[i].used) {
-      vtpc_files[i].used = 1;
-      return i;
-    }
-  }
-  errno = EMFILE;
-  return -1;
-}
-
-static VtpcFile* vtpc_get_file(int fd) {
-  if (fd < 0 || fd > VTPC_MAX_FILES || !vtpc_files[fd].used) {
-    errno = EBADF;
-    return NULL;
-  }
-  return &vtpc_files[fd];
-}
-
-static void vtpc_free_slot(int vfd) {
-  memset(&vtpc_files[vfd], 0, sizeof(vtpc_files[vfd]));
-}
-
-// API
+#include "vtpc_internal.h"
 
 int vtpc_open(const char* path, int mode, int access) {
   if (!path) {
@@ -53,57 +12,47 @@ int vtpc_open(const char* path, int mode, int access) {
     return -1;
   }
 
-  int vfd = vtpc_alloc_slot();
-  if (vfd < 0) {
+  int vfd = vtpc_fd_alloc();
+  if (vfd < 0)
     return -1;
-  }
 
-  int os_fd;
-  if (mode & O_CREAT) {
-    os_fd = open(path, mode, access);
-  } else {
-    os_fd = open(path, mode);
-  }
-
+  int os_fd = vtpc_io_open_direct(path, mode, access);
   if (os_fd < 0) {
-    vtpc_free_slot(vfd);
+    vtpc_fd_free(vfd);
     return -1;
   }
 
-  vtpc_files[vfd].os_fd = os_fd;
-  vtpc_files[vfd].pos = 0;
-  vtpc_files[vfd].mode = mode;
-  vtpc_files[vfd].access = access;
+  g_files[vfd].os_fd = os_fd;
+  g_files[vfd].pos = 0;
+  g_files[vfd].mode = mode;
+  g_files[vfd].access = access;
 
   return vfd;
 }
 
 int vtpc_close(int fd) {
-  VtpcFile* f = vtpc_get_file(fd);
+  VtpcFile* f = vtpc_fd_get(fd);
   if (!f) {
     return -1;
   }
+
+  vtpc_cache_forget_file(fd);
 
   if (close(f->os_fd) != 0) {
     return -1;
   }
 
-  vtpc_free_slot(fd);
+  vtpc_fd_free(fd);
   return 0;
 }
 
 off_t vtpc_lseek(int fd, off_t offset, int whence) {
-  VtpcFile* f = vtpc_get_file(fd);
+  VtpcFile* f = vtpc_fd_get(fd);
   if (!f) {
     return (off_t)-1;
   }
 
-  // по заданию только абсолютное позиционирование
-  if (whence != SEEK_SET) {
-    errno = EINVAL;
-    return (off_t)-1;
-  }
-  if (offset < 0) {
+  if (whence != SEEK_SET || offset < 0) {
     errno = EINVAL;
     return (off_t)-1;
   }
@@ -113,7 +62,67 @@ off_t vtpc_lseek(int fd, off_t offset, int whence) {
 }
 
 ssize_t vtpc_read(int fd, void* buf, size_t count) {
-  return read(fd, buf, count);
+  VtpcFile* f = vtpc_fd_get(fd);
+  if (!f) {
+    return -1;
+  }
+
+  if (!buf && count != 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (count == 0) {
+    return 0;
+  }
+
+  off_t file_size = vtpc_io_get_size(f->os_fd);
+  if (file_size < 0) {
+    return -1;
+  }
+
+  if (f->pos >= file_size) {
+    return 0;
+  }
+
+  size_t total = 0;
+  unsigned char* out = (unsigned char*)buf;
+
+  while (total < count) {
+    off_t cur = f->pos;
+
+    off_t page_index = cur / (off_t)VTPC_PAGE_SIZE;
+    size_t page_off = (size_t)(cur % (off_t)VTPC_PAGE_SIZE);
+
+    CachePage* p = vtpc_cache_get_or_load(fd, f->os_fd, page_index);
+    if (!p) {
+      if (total > 0) {
+        break;
+      }
+      return -1;
+    }
+
+    if (p->valid_bytes == 0) {
+      break;
+    }
+
+    if (page_off >= p->valid_bytes) {
+      break;
+    }
+
+    size_t avail = p->valid_bytes - page_off;
+    size_t need = count - total;
+    size_t chunk = (avail < need) ? avail : need;
+
+    memcpy(out + total, (unsigned char*)p->data + page_off, chunk);
+
+    total += chunk;
+    f->pos += (off_t)chunk;
+
+    if (f->pos >= file_size)
+      break;
+  }
+
+  return (ssize_t)total;
 }
 
 ssize_t vtpc_write(int fd, const void* buf, size_t count) {
