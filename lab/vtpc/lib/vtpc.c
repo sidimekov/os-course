@@ -7,6 +7,7 @@
 
 #include "vtpc_internal.h"
 
+// открывает файл, инициализирует состояние и размер
 int vtpc_open(const char* path, int mode, int access) {
   if (!path) {
     errno = EINVAL;
@@ -40,6 +41,7 @@ int vtpc_open(const char* path, int mode, int access) {
   return vfd;
 }
 
+// закрывает файл, при записи делает flush и забывает страницы
 int vtpc_close(int fd) {
   VtpcFile* f = vtpc_fd_get(fd);
   if (!f) {
@@ -65,6 +67,7 @@ int vtpc_close(int fd) {
   return 0;
 }
 
+// перемещает позицию, поддерживает только seek set
 off_t vtpc_lseek(int fd, off_t offset, int whence) {
   VtpcFile* f = vtpc_fd_get(fd);
   if (!f) {
@@ -80,14 +83,10 @@ off_t vtpc_lseek(int fd, off_t offset, int whence) {
   return offset;
 }
 
+// читает из userspace кэша, размер берётся из сохранённого состояния
 ssize_t vtpc_read(int fd, void* buf, size_t count) {
   VtpcFile* f = vtpc_fd_get(fd);
   if (!f) {
-    return -1;
-  }
-  unsigned int acc = (unsigned int)f->mode & O_ACCMODE;
-  if (acc == O_WRONLY) {
-    errno = EBADF;
     return -1;
   }
 
@@ -97,15 +96,6 @@ ssize_t vtpc_read(int fd, void* buf, size_t count) {
   }
   if (count == 0) {
     return 0;
-  }
-
-  off_t disk_size = vtpc_io_get_size(f->os_fd);
-  if (disk_size < 0) {
-    return -1;
-  }
-
-  if (disk_size > f->size) {
-    f->size = disk_size;
   }
 
   if (f->pos >= f->size) {
@@ -121,7 +111,7 @@ ssize_t vtpc_read(int fd, void* buf, size_t count) {
     off_t page_index = cur / (off_t)VTPC_PAGE_SIZE;
     size_t page_off = (size_t)(cur % (off_t)VTPC_PAGE_SIZE);
 
-    CachePage* p = vtpc_cache_get_or_load(fd, f->os_fd, page_index);
+    CachePage* p = vtpc_cache_get_or_load(fd, f->os_fd, page_index, f->size);
     if (!p) {
       if (total > 0) {
         break;
@@ -156,6 +146,7 @@ ssize_t vtpc_read(int fd, void* buf, size_t count) {
   return (ssize_t)total;
 }
 
+// пишет через кэш, для полной перезаписи страницы не подгружает старые данные
 ssize_t vtpc_write(int fd, const void* buf, size_t count) {
   VtpcFile* f = vtpc_fd_get(fd);
   if (!f) {
@@ -178,17 +169,24 @@ ssize_t vtpc_write(int fd, const void* buf, size_t count) {
     off_t page_index = cur / (off_t)VTPC_PAGE_SIZE;
     size_t page_off = (size_t)(cur % (off_t)VTPC_PAGE_SIZE);
 
-    CachePage* p = vtpc_cache_get_for_write(fd, f->os_fd, page_index, f->size);
+    size_t available = (size_t)VTPC_PAGE_SIZE - page_off;
+    size_t need = count - total;
+    size_t chunk = (available < need) ? available : need;
+
+    VtpcPageInit init = VTPC_PAGE_INIT_LOAD;
+    if (page_off == 0 && chunk == (size_t)VTPC_PAGE_SIZE) {
+      init = VTPC_PAGE_INIT_NONE;
+      g_stats.skip_load_full_overwrite += 1;
+    }
+
+    CachePage* p =
+        vtpc_cache_get_for_write_ex(fd, f->os_fd, page_index, f->size, init);
     if (!p) {
       if (total > 0) {
         break;
       }
       return -1;
     }
-
-    size_t available = (size_t)VTPC_PAGE_SIZE - page_off;
-    size_t need = count - total;
-    size_t chunk = (available < need) ? available : need;
 
     memcpy((unsigned char*)p->data + page_off, in + total, chunk);
     p->dirty = 1;
@@ -205,6 +203,7 @@ ssize_t vtpc_write(int fd, const void* buf, size_t count) {
   return (ssize_t)total;
 }
 
+// сбрасывает грязные страницы и синхронизирует файл
 int vtpc_fsync(int fd) {
   VtpcFile* f = vtpc_fd_get(fd);
   if (!f) {
@@ -223,5 +222,26 @@ int vtpc_fsync(int fd) {
     return -1;
   }
 
+  return 0;
+}
+
+// сбрасывает счётчики, полезно для замеров
+void vtpc_stats_reset(void) {
+  memset(&g_stats, 0, sizeof(g_stats));
+}
+
+// возвращает снимок счётчиков
+int vtpc_stats_get(vtpc_stats* out) {
+  if (!out) {
+    errno = EINVAL;
+    return -1;
+  }
+  out->cache_hit = g_stats.cache_hit;
+  out->cache_miss = g_stats.cache_miss;
+  out->pread_pages = g_stats.pread_pages;
+  out->pwrite_pages = g_stats.pwrite_pages;
+  out->flush_pages = g_stats.flush_pages;
+  out->evict_pages = g_stats.evict_pages;
+  out->skip_load_full_overwrite = g_stats.skip_load_full_overwrite;
   return 0;
 }

@@ -3,8 +3,7 @@
 
 #include "vtpc_internal.h"
 
-// fd helpers
-
+// выделяет виртуальный fd
 int vtpc_fd_alloc(void) {
   for (int i = 0; i < VTPC_MAX_FILES; ++i) {
     if (!g_files[i].used) {
@@ -16,6 +15,7 @@ int vtpc_fd_alloc(void) {
   return -1;
 }
 
+// проверяет виртуальный fd, возвращает запись из таблицы
 VtpcFile* vtpc_fd_get(int vfd) {
   if (vfd < 0 || vfd >= VTPC_MAX_FILES || !g_files[vfd].used) {
     errno = EBADF;

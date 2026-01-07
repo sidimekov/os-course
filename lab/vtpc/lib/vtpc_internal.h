@@ -1,4 +1,4 @@
-// внутренние структуры / типы
+// внутренние структуры и типы
 
 #pragma once
 
@@ -29,9 +29,27 @@ typedef struct {
   uint64_t last_use;
 } CachePage;
 
+typedef struct {
+  uint64_t cache_hit;
+  uint64_t cache_miss;
+  uint64_t pread_pages;
+  uint64_t pwrite_pages;
+  uint64_t flush_pages;
+  uint64_t evict_pages;
+  uint64_t skip_load_full_overwrite;
+} VtpcStats;
+
+// флаг инициализации кэша при записи (нужно ли подгружать старое содержимое страницы с диска)
+typedef enum {
+  VTPC_PAGE_INIT_LOAD = 0,
+  VTPC_PAGE_INIT_ZERO = 1,
+  VTPC_PAGE_INIT_NONE = 2,
+} VtpcPageInit;
+
 extern VtpcFile g_files[VTPC_MAX_FILES];
 extern CachePage g_cache[VTPC_CACHE_PAGES];
 extern uint64_t g_use_tick;
+extern VtpcStats g_stats;
 
 int vtpc_fd_alloc(void);
 VtpcFile* vtpc_fd_get(int vfd);
@@ -46,10 +64,13 @@ int vtpc_io_truncate(int os_fd, off_t size);
 
 CachePage* vtpc_cache_find(int vfd, off_t page_index);
 CachePage* vtpc_cache_get_or_load(
-    int vfd, int os_fd, off_t page_index
+    int vfd, int os_fd, off_t page_index, off_t file_size
 );
 CachePage* vtpc_cache_get_for_write(
     int vfd, int os_fd, off_t page_index, off_t file_size
+);
+CachePage* vtpc_cache_get_for_write_ex(
+    int vfd, int os_fd, off_t page_index, off_t file_size, VtpcPageInit init
 );
 int vtpc_cache_flush_page(CachePage* p);
 int vtpc_cache_flush_file(int vfd);
