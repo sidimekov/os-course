@@ -32,9 +32,16 @@ static const size_t IO_ARG_RANGE_PREFIX_LEN = 8U;
 static const size_t IO_ARG_DIRECT_PREFIX_LEN = 9U;
 static const size_t IO_ARG_TYPE_PREFIX_LEN = 7U;
 static const size_t IO_ARG_BACKEND_PREFIX_LEN = 10U;
+static const size_t IO_ARG_CACHE_PREFIX_LEN = 8U;
 
 typedef enum { MODE_READ = 0, MODE_WRITE = 1 } rw_mode_t;
 typedef enum { SEL_SEQ = 0, SEL_RAND = 1 } sel_mode_t;
+typedef enum {
+  CACHE_UNSPEC = 0,
+  CACHE_NONE,
+  CACHE_OS,
+  CACHE_VTPC
+} cache_mode_t;
 
 typedef struct {
   rw_mode_t operation_mode;
@@ -42,12 +49,16 @@ typedef struct {
   size_t block_count;
   const char* file_path;
   off_t range_start;
-  off_t range_end; /* 0 -> no upper limit */
+  off_t range_end; /* 0 означает нет верхней границы */
   bool use_direct;
   sel_mode_t selection_mode;
   bool use_vtpc;
+  cache_mode_t cache_mode;
+  bool backend_set;
+  bool direct_set;
 } config_t;
 
+// печать сообщений об ошибках без падения
 static void safe_fprintf(FILE* stream, const char* format_string, ...) {
   va_list args;
   va_start(args, format_string);
@@ -58,11 +69,13 @@ static void safe_fprintf(FILE* stream, const char* format_string, ...) {
   }
 }
 
+// простой генератор псевдослучайных чисел
 static uint32_t lcg_next(uint32_t* random_state) {
   *random_state = IO_LCG_MULTIPLIER * (*random_state) + IO_LCG_INCREMENT;
   return *random_state;
 }
 
+// вывод справки по параметрам
 static void print_usage(const char* program_name) {
   safe_fprintf(
       stderr,
@@ -72,13 +85,15 @@ static void print_usage(const char* program_name) {
       "--block_count=N "
       "--file=PATH "
       "[--range=START-END] "
-      "[--direct=on|off] "
       "[--type=sequence|random] "
+      "[--cache=none|os|vtpc] "
+      "[--direct=on|off] "
       "[--backend=libc|vtpc]\n",
       program_name
   );
 }
 
+// разбор диапазона start end
 static bool parse_range(
     const char* string, off_t* range_start, off_t* range_end
 ) {
@@ -102,11 +117,16 @@ static bool parse_range(
   errno = 0;
   const long long end_value =
       strtoll(dash_position + 1, &local_end_pointer, IO_NUM_BASE);
-  if (errno != 0 || end_value < 0) {
+  if (errno != 0 || local_end_pointer == (dash_position + 1) ||
+      *local_end_pointer != '\0') {
     return false;
   }
 
-  if (start_value < 0) {
+  if (start_value < 0 || end_value < 0) {
+    return false;
+  }
+
+  if (end_value != 0 && end_value < start_value) {
     return false;
   }
 
@@ -115,6 +135,7 @@ static bool parse_range(
   return true;
 }
 
+// разбор числа в size t
 static bool parse_size_t(const char* string, size_t* output_value) {
   if (string == NULL || output_value == NULL) {
     return false;
@@ -131,6 +152,7 @@ static bool parse_size_t(const char* string, size_t* output_value) {
   return true;
 }
 
+// разбор выбора бэкенда
 static bool parse_backend(const char* value, bool* use_vtpc) {
   if (value == NULL || use_vtpc == NULL) {
     return false;
@@ -146,6 +168,27 @@ static bool parse_backend(const char* value, bool* use_vtpc) {
   return false;
 }
 
+// разбор режима кэша и установка флагов
+static bool parse_cache(const char* value, config_t* config) {
+  if (value == NULL || config == NULL) {
+    return false;
+  }
+  if (strcmp(value, "none") == 0) {
+    config->cache_mode = CACHE_NONE;
+    return true;
+  }
+  if (strcmp(value, "os") == 0) {
+    config->cache_mode = CACHE_OS;
+    return true;
+  }
+  if (strcmp(value, "vtpc") == 0) {
+    config->cache_mode = CACHE_VTPC;
+    return true;
+  }
+  return false;
+}
+
+// обработка режима read write
 static bool handle_rw_argument(const char* value, config_t* config) {
   if (strcmp(value, "read") == 0) {
     config->operation_mode = MODE_READ;
@@ -159,19 +202,23 @@ static bool handle_rw_argument(const char* value, config_t* config) {
   return false;
 }
 
+// обработка флага direct
 static bool handle_direct_argument(const char* value, config_t* config) {
   if (strcmp(value, "on") == 0) {
     config->use_direct = true;
+    config->direct_set = true;
     return true;
   }
   if (strcmp(value, "off") == 0) {
     config->use_direct = false;
+    config->direct_set = true;
     return true;
   }
   safe_fprintf(stderr, "bad direct value: %s\n", value);
   return false;
 }
 
+// обработка типа доступа sequence random
 static bool handle_type_argument(const char* value, config_t* config) {
   if (strcmp(value, "sequence") == 0) {
     config->selection_mode = SEL_SEQ;
@@ -185,6 +232,7 @@ static bool handle_type_argument(const char* value, config_t* config) {
   return false;
 }
 
+// разбор одного аргумента командной строки
 static bool process_single_argument(const char* argument, config_t* config) {
   if (strncmp(argument, "--rw=", IO_ARG_RW_PREFIX_LEN) == 0) {
     const char* value = argument + IO_ARG_RW_PREFIX_LEN;
@@ -239,6 +287,16 @@ static bool process_single_argument(const char* argument, config_t* config) {
       safe_fprintf(stderr, "bad backend: %s (use libc|vtpc)\n", value);
       return false;
     }
+    config->backend_set = true;
+    return true;
+  }
+
+  if (strncmp(argument, "--cache=", IO_ARG_CACHE_PREFIX_LEN) == 0) {
+    const char* value = argument + IO_ARG_CACHE_PREFIX_LEN;
+    if (!parse_cache(value, config)) {
+      safe_fprintf(stderr, "bad cache: %s (use none|os|vtpc)\n", value);
+      return false;
+    }
     return true;
   }
 
@@ -246,6 +304,7 @@ static bool process_single_argument(const char* argument, config_t* config) {
   return false;
 }
 
+// разбор всех аргументов и заполнение конфига
 static bool parse_args(
     int argument_count, char** argument_values, config_t* config
 ) {
@@ -253,7 +312,6 @@ static bool parse_args(
     return false;
   }
 
-  /* defaults */
   config->operation_mode = MODE_READ;
   config->block_size = 0U;
   config->block_count = 0U;
@@ -263,6 +321,9 @@ static bool parse_args(
   config->use_direct = false;
   config->selection_mode = SEL_SEQ;
   config->use_vtpc = false;
+  config->cache_mode = CACHE_UNSPEC;
+  config->backend_set = false;
+  config->direct_set = false;
 
   for (int argument_index = 1; argument_index < argument_count;
        ++argument_index) {
@@ -275,9 +336,28 @@ static bool parse_args(
       config->block_count == 0U) {
     return false;
   }
+
+  if (config->cache_mode != CACHE_UNSPEC) {
+    if (config->backend_set || config->direct_set) {
+      safe_fprintf(stderr, "warning: cache overrides backend and direct\n");
+    }
+
+    if (config->cache_mode == CACHE_NONE) {
+      config->use_vtpc = false;
+      config->use_direct = true;
+    } else if (config->cache_mode == CACHE_OS) {
+      config->use_vtpc = false;
+      config->use_direct = false;
+    } else {
+      config->use_vtpc = true;
+      config->use_direct = true;
+    }
+  }
+
   return true;
 }
 
+// получение размера файла через stat
 static bool get_path_size(const char* path_string, off_t* output_size) {
   if (path_string == NULL || output_size == NULL) {
     return false;
@@ -290,6 +370,7 @@ static bool get_path_size(const char* path_string, off_t* output_size) {
   return true;
 }
 
+// выбор случайного смещения по блокам
 static off_t choose_random_offset(
     off_t start_offset,
     off_t end_offset,
@@ -307,6 +388,7 @@ static off_t choose_random_offset(
   return start_offset + (off_t)block_size * index_value;
 }
 
+// переход на нужное смещение
 static bool seek_to_offset(
     const io_backend_ops_t* backend, int file_descriptor, off_t offset_value
 ) {
@@ -321,10 +403,9 @@ static bool seek_to_offset(
   return true;
 }
 
+// расчет следующего смещения по режиму sequence random
 static off_t calculate_offset(
-    const config_t* config,
-    off_t* current_offset,
-    uint32_t* random_state
+    const config_t* config, off_t* current_offset, uint32_t* random_state
 ) {
   if (config->selection_mode == SEL_SEQ) {
     off_t offset_value = *current_offset;
@@ -335,14 +416,17 @@ static off_t calculate_offset(
     }
     return offset_value;
   }
+
   if (config->range_end == 0) {
     return config->range_start;
   }
+
   return choose_random_offset(
       config->range_start, config->range_end, config->block_size, random_state
   );
 }
 
+// выполнение одного read или write
 static bool perform_single_io_operation(
     const config_t* config,
     const io_backend_ops_t* backend,
@@ -351,7 +435,7 @@ static bool perform_single_io_operation(
     off_t offset_value
 ) {
   if (!seek_to_offset(backend, file_descriptor, offset_value)) {
-    perror("lseek/vtpc_lseek");
+    perror("lseek");
     return false;
   }
 
@@ -365,10 +449,7 @@ static bool perform_single_io_operation(
   }
 
   if (bytes_processed < 0) {
-    perror(
-        (config->operation_mode == MODE_READ) ? "read/vtpc_read"
-                                              : "write/vtpc_write"
-    );
+    perror((config->operation_mode == MODE_READ) ? "read" : "write");
     return false;
   }
 
@@ -387,45 +468,118 @@ static bool perform_single_io_operation(
   return true;
 }
 
-static bool allocate_buffer(
-    const config_t* config,
-    const io_backend_ops_t* backend,
-    int file_descriptor,
-    void** output_buffer
-) {
-  const bool need_aligned_buffer = (config->use_direct && !config->use_vtpc);
-  if (need_aligned_buffer) {
-    if ((config->block_size % IO_DIRECT_MIN_BLOCK) != 0U) {
-      safe_fprintf(
-          stderr,
-          "block_size must be multiple of %d for O_DIRECT\n",
-          IO_DIRECT_MIN_BLOCK
-      );
-      (void)backend->close_fn(file_descriptor);
-      return false;
-    }
+// проверка ограничений для o direct
+static bool validate_direct_requirements(const config_t* config) {
+  if (!config->use_direct) {
+    return true;
+  }
 
+#ifndef O_DIRECT
+  safe_fprintf(stderr, "O_DIRECT is not supported on this platform\n");
+  return false;
+#else
+  if ((config->block_size % IO_DIRECT_MIN_BLOCK) != 0U) {
+    safe_fprintf(
+        stderr,
+        "block_size must be multiple of %d for O_DIRECT\n",
+        IO_DIRECT_MIN_BLOCK
+    );
+    return false;
+  }
+  if ((config->range_start % (off_t)IO_DIRECT_MIN_BLOCK) != 0) {
+    safe_fprintf(stderr, "range start must be aligned for O_DIRECT\n");
+    return false;
+  }
+  return true;
+#endif
+}
+
+// выделение буфера с учетом выравнивания
+static bool allocate_buffer(const config_t* config, void** output_buffer) {
+  if (config == NULL || output_buffer == NULL) {
+    return false;
+  }
+
+  if (config->use_direct) {
     void* aligned_buffer = NULL;
     const int align_result =
         posix_memalign(&aligned_buffer, IO_ALIGN, config->block_size);
     if (align_result != 0 || aligned_buffer == NULL) {
       safe_fprintf(stderr, "posix_memalign failed, rc=%d\n", align_result);
-      (void)backend->close_fn(file_descriptor);
       return false;
     }
     *output_buffer = aligned_buffer;
-  } else {
-    void* buffer = malloc(config->block_size);
-    if (buffer == NULL) {
-      perror("malloc");
-      (void)backend->close_fn(file_descriptor);
-      return false;
-    }
-    *output_buffer = buffer;
+    return true;
   }
+
+  void* buffer = malloc(config->block_size);
+  if (buffer == NULL) {
+    perror("malloc");
+    return false;
+  }
+  *output_buffer = buffer;
   return true;
 }
 
+// нормализация диапазона для режима random
+static void normalize_range(config_t* config) {
+  if (config->operation_mode == MODE_READ) {
+    off_t file_size = 0;
+    if (get_path_size(config->file_path, &file_size)) {
+      if (config->range_end == 0 || config->range_end > file_size) {
+        config->range_end = file_size;
+      }
+    }
+  }
+
+  if (config->selection_mode != SEL_RAND) {
+    return;
+  }
+
+  if (config->range_end != 0) {
+    return;
+  }
+
+  if (config->operation_mode != MODE_WRITE) {
+    return;
+  }
+
+  off_t file_size = 0;
+  if (get_path_size(config->file_path, &file_size) && file_size > 0) {
+    config->range_end = file_size;
+    return;
+  }
+
+  config->range_end = config->range_start +
+                      (off_t)config->block_size * (off_t)config->block_count;
+}
+
+// проверка диапазона для чтения
+static bool validate_read_range(const config_t* config) {
+  if (config->operation_mode != MODE_READ) {
+    return true;
+  }
+
+  off_t file_size = 0;
+  if (!get_path_size(config->file_path, &file_size)) {
+    return true;
+  }
+
+  if (config->range_start >= file_size) {
+    safe_fprintf(stderr, "range start is beyond file size\n");
+    return false;
+  }
+
+  if (config->range_end != 0 &&
+      config->range_start + (off_t)config->block_size > config->range_end) {
+    safe_fprintf(stderr, "range is smaller than one block\n");
+    return false;
+  }
+
+  return true;
+}
+
+// основной цикл io операций
 static void perform_io_operations(
     const config_t* config,
     const io_backend_ops_t* backend,
@@ -448,10 +602,21 @@ static void perform_io_operations(
   }
 }
 
+// точка входа и запуск сценария нагрузки
 int main(int argument_count, char** argument_values) {
   config_t config;
   if (!parse_args(argument_count, argument_values, &config)) {
     print_usage(argument_values[0]);
+    return EXIT_FAILURE;
+  }
+
+  normalize_range(&config);
+
+  if (!validate_read_range(&config)) {
+    return EXIT_FAILURE;
+  }
+
+  if (!validate_direct_requirements(&config)) {
     return EXIT_FAILURE;
   }
 
@@ -464,39 +629,22 @@ int main(int argument_count, char** argument_values) {
   unsigned int open_flags =
       (config.operation_mode == MODE_READ) ? O_RDONLY : (O_WRONLY | O_CREAT);
 
-  if (config.use_direct && config.use_vtpc) {
-    safe_fprintf(stderr, "warning: --direct is ignored for vtpc backend\n");
-  }
-
 #ifdef O_DIRECT
-  if (config.use_direct && !config.use_vtpc) {
+  if (config.use_direct) {
     open_flags |= O_DIRECT;
   }
-#else
-  if (config.use_direct && !config.use_vtpc) {
-    safe_fprintf(stderr, "O_DIRECT is not supported on this platform\n");
-    return EXIT_FAILURE;
-  }
 #endif
-
-  if (config.operation_mode == MODE_READ && config.range_end == 0) {
-    off_t file_size = 0;
-    if (!get_path_size(config.file_path, &file_size)) {
-      perror("stat");
-      return EXIT_FAILURE;
-    }
-    config.range_end = file_size;
-  }
 
   const int file_descriptor =
       backend->open_fn(config.file_path, (int)open_flags, (int)IO_DEFAULT_MODE);
   if (file_descriptor < 0) {
-    perror("open/vtpc_open");
+    perror("open");
     return EXIT_FAILURE;
   }
 
   void* buffer = NULL;
-  if (!allocate_buffer(&config, backend, file_descriptor, &buffer)) {
+  if (!allocate_buffer(&config, &buffer)) {
+    (void)backend->close_fn(file_descriptor);
     return EXIT_FAILURE;
   }
 
@@ -508,13 +656,14 @@ int main(int argument_count, char** argument_values) {
 
   if (config.operation_mode == MODE_WRITE) {
     if (backend->fsync_fn(file_descriptor) != 0) {
-      perror("fsync/vtpc_fsync");
+      perror("fsync");
     }
   }
 
   free(buffer);
+
   if (backend->close_fn(file_descriptor) != 0) {
-    perror("close/vtpc_close");
+    perror("close");
     return EXIT_FAILURE;
   }
 

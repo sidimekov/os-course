@@ -16,4 +16,5 @@ typedef struct io_backend_ops {
   const char* backend_name;
 } io_backend_ops_t;
 
+// выбор бэкенда для io операций
 const io_backend_ops_t* io_backend_get(bool use_vtpc);

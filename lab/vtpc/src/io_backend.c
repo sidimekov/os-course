@@ -82,6 +82,7 @@ static const io_backend_ops_t VTPC_BACKEND = {
     .backend_name = "vtpc",
 };
 
+// выбор бэкенда по флагу
 const io_backend_ops_t* io_backend_get(bool use_vtpc) {
   if (use_vtpc) {
     return &VTPC_BACKEND;
