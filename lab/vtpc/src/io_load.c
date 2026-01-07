@@ -146,6 +146,106 @@ static bool parse_backend(const char* value, bool* use_vtpc) {
   return false;
 }
 
+static bool handle_rw_argument(const char* value, config_t* config) {
+  if (strcmp(value, "read") == 0) {
+    config->operation_mode = MODE_READ;
+    return true;
+  }
+  if (strcmp(value, "write") == 0) {
+    config->operation_mode = MODE_WRITE;
+    return true;
+  }
+  safe_fprintf(stderr, "unknown rw mode: %s\n", value);
+  return false;
+}
+
+static bool handle_direct_argument(const char* value, config_t* config) {
+  if (strcmp(value, "on") == 0) {
+    config->use_direct = true;
+    return true;
+  }
+  if (strcmp(value, "off") == 0) {
+    config->use_direct = false;
+    return true;
+  }
+  safe_fprintf(stderr, "bad direct value: %s\n", value);
+  return false;
+}
+
+static bool handle_type_argument(const char* value, config_t* config) {
+  if (strcmp(value, "sequence") == 0) {
+    config->selection_mode = SEL_SEQ;
+    return true;
+  }
+  if (strcmp(value, "random") == 0) {
+    config->selection_mode = SEL_RAND;
+    return true;
+  }
+  safe_fprintf(stderr, "bad type: %s\n", value);
+  return false;
+}
+
+static bool process_single_argument(const char* argument, config_t* config) {
+  if (strncmp(argument, "--rw=", IO_ARG_RW_PREFIX_LEN) == 0) {
+    const char* value = argument + IO_ARG_RW_PREFIX_LEN;
+    return handle_rw_argument(value, config);
+  }
+
+  if (strncmp(argument, "--block_size=", IO_ARG_BLOCK_SIZE_PREFIX_LEN) == 0) {
+    const char* value = argument + IO_ARG_BLOCK_SIZE_PREFIX_LEN;
+    if (!parse_size_t(value, &config->block_size)) {
+      safe_fprintf(stderr, "bad block_size: %s\n", value);
+      return false;
+    }
+    return true;
+  }
+
+  if (strncmp(argument, "--block_count=", IO_ARG_BLOCK_COUNT_PREFIX_LEN) == 0) {
+    const char* value = argument + IO_ARG_BLOCK_COUNT_PREFIX_LEN;
+    if (!parse_size_t(value, &config->block_count)) {
+      safe_fprintf(stderr, "bad block_count: %s\n", value);
+      return false;
+    }
+    return true;
+  }
+
+  if (strncmp(argument, "--file=", IO_ARG_FILE_PREFIX_LEN) == 0) {
+    config->file_path = argument + IO_ARG_FILE_PREFIX_LEN;
+    return true;
+  }
+
+  if (strncmp(argument, "--range=", IO_ARG_RANGE_PREFIX_LEN) == 0) {
+    const char* value = argument + IO_ARG_RANGE_PREFIX_LEN;
+    if (!parse_range(value, &config->range_start, &config->range_end)) {
+      safe_fprintf(stderr, "bad range: %s\n", value);
+      return false;
+    }
+    return true;
+  }
+
+  if (strncmp(argument, "--direct=", IO_ARG_DIRECT_PREFIX_LEN) == 0) {
+    const char* value = argument + IO_ARG_DIRECT_PREFIX_LEN;
+    return handle_direct_argument(value, config);
+  }
+
+  if (strncmp(argument, "--type=", IO_ARG_TYPE_PREFIX_LEN) == 0) {
+    const char* value = argument + IO_ARG_TYPE_PREFIX_LEN;
+    return handle_type_argument(value, config);
+  }
+
+  if (strncmp(argument, "--backend=", IO_ARG_BACKEND_PREFIX_LEN) == 0) {
+    const char* value = argument + IO_ARG_BACKEND_PREFIX_LEN;
+    if (!parse_backend(value, &config->use_vtpc)) {
+      safe_fprintf(stderr, "bad backend: %s (use libc|vtpc)\n", value);
+      return false;
+    }
+    return true;
+  }
+
+  safe_fprintf(stderr, "unknown argument: %s\n", argument);
+  return false;
+}
+
 static bool parse_args(
     int argument_count, char** argument_values, config_t* config
 ) {
@@ -166,79 +266,7 @@ static bool parse_args(
 
   for (int argument_index = 1; argument_index < argument_count;
        ++argument_index) {
-    const char* argument = argument_values[argument_index];
-
-    if (strncmp(argument, "--rw=", IO_ARG_RW_PREFIX_LEN) == 0) {
-      const char* value = argument + IO_ARG_RW_PREFIX_LEN;
-      if (strcmp(value, "read") == 0) {
-        config->operation_mode = MODE_READ;
-      } else if (strcmp(value, "write") == 0) {
-        config->operation_mode = MODE_WRITE;
-      } else {
-        safe_fprintf(stderr, "unknown rw mode: %s\n", value);
-        return false;
-      }
-
-    } else if (strncmp(
-                   argument, "--block_size=", IO_ARG_BLOCK_SIZE_PREFIX_LEN
-               ) == 0) {
-      const char* value = argument + IO_ARG_BLOCK_SIZE_PREFIX_LEN;
-      if (!parse_size_t(value, &config->block_size)) {
-        safe_fprintf(stderr, "bad block_size: %s\n", value);
-        return false;
-      }
-
-    } else if (strncmp(
-                   argument, "--block_count=", IO_ARG_BLOCK_COUNT_PREFIX_LEN
-               ) == 0) {
-      const char* value = argument + IO_ARG_BLOCK_COUNT_PREFIX_LEN;
-      if (!parse_size_t(value, &config->block_count)) {
-        safe_fprintf(stderr, "bad block_count: %s\n", value);
-        return false;
-      }
-
-    } else if (strncmp(argument, "--file=", IO_ARG_FILE_PREFIX_LEN) == 0) {
-      config->file_path = argument + IO_ARG_FILE_PREFIX_LEN;
-
-    } else if (strncmp(argument, "--range=", IO_ARG_RANGE_PREFIX_LEN) == 0) {
-      const char* value = argument + IO_ARG_RANGE_PREFIX_LEN;
-      if (!parse_range(value, &config->range_start, &config->range_end)) {
-        safe_fprintf(stderr, "bad range: %s\n", value);
-        return false;
-      }
-
-    } else if (strncmp(argument, "--direct=", IO_ARG_DIRECT_PREFIX_LEN) == 0) {
-      const char* value = argument + IO_ARG_DIRECT_PREFIX_LEN;
-      if (strcmp(value, "on") == 0) {
-        config->use_direct = true;
-      } else if (strcmp(value, "off") == 0) {
-        config->use_direct = false;
-      } else {
-        safe_fprintf(stderr, "bad direct value: %s\n", value);
-        return false;
-      }
-
-    } else if (strncmp(argument, "--type=", IO_ARG_TYPE_PREFIX_LEN) == 0) {
-      const char* value = argument + IO_ARG_TYPE_PREFIX_LEN;
-      if (strcmp(value, "sequence") == 0) {
-        config->selection_mode = SEL_SEQ;
-      } else if (strcmp(value, "random") == 0) {
-        config->selection_mode = SEL_RAND;
-      } else {
-        safe_fprintf(stderr, "bad type: %s\n", value);
-        return false;
-      }
-
-    } else if (strncmp(argument, "--backend=", IO_ARG_BACKEND_PREFIX_LEN) ==
-               0) {
-      const char* value = argument + IO_ARG_BACKEND_PREFIX_LEN;
-      if (!parse_backend(value, &config->use_vtpc)) {
-        safe_fprintf(stderr, "bad backend: %s (use libc|vtpc)\n", value);
-        return false;
-      }
-
-    } else {
-      safe_fprintf(stderr, "unknown argument: %s\n", argument);
+    if (!process_single_argument(argument_values[argument_index], config)) {
       return false;
     }
   }
@@ -293,6 +321,133 @@ static bool seek_to_offset(
   return true;
 }
 
+static off_t calculate_offset(
+    const config_t* config,
+    off_t* current_offset,
+    uint32_t* random_state
+) {
+  if (config->selection_mode == SEL_SEQ) {
+    off_t offset_value = *current_offset;
+    *current_offset += (off_t)config->block_size;
+    if (config->range_end != 0 &&
+        (*current_offset + (off_t)config->block_size > config->range_end)) {
+      *current_offset = config->range_start;
+    }
+    return offset_value;
+  }
+  if (config->range_end == 0) {
+    return config->range_start;
+  }
+  return choose_random_offset(
+      config->range_start, config->range_end, config->block_size, random_state
+  );
+}
+
+static bool perform_single_io_operation(
+    const config_t* config,
+    const io_backend_ops_t* backend,
+    int file_descriptor,
+    void* buffer,
+    off_t offset_value
+) {
+  if (!seek_to_offset(backend, file_descriptor, offset_value)) {
+    perror("lseek/vtpc_lseek");
+    return false;
+  }
+
+  ssize_t bytes_processed = 0;
+  if (config->operation_mode == MODE_READ) {
+    bytes_processed =
+        backend->read_fn(file_descriptor, buffer, config->block_size);
+  } else {
+    bytes_processed =
+        backend->write_fn(file_descriptor, buffer, config->block_size);
+  }
+
+  if (bytes_processed < 0) {
+    perror(
+        (config->operation_mode == MODE_READ) ? "read/vtpc_read"
+                                              : "write/vtpc_write"
+    );
+    return false;
+  }
+
+  if ((size_t)bytes_processed != config->block_size) {
+    safe_fprintf(
+        stderr,
+        "short %s at offset %jd: got %zd, expected %zu\n",
+        (config->operation_mode == MODE_READ) ? "read" : "write",
+        (intmax_t)offset_value,
+        bytes_processed,
+        config->block_size
+    );
+    return false;
+  }
+
+  return true;
+}
+
+static bool allocate_buffer(
+    const config_t* config,
+    const io_backend_ops_t* backend,
+    int file_descriptor,
+    void** output_buffer
+) {
+  const bool need_aligned_buffer = (config->use_direct && !config->use_vtpc);
+  if (need_aligned_buffer) {
+    if ((config->block_size % IO_DIRECT_MIN_BLOCK) != 0U) {
+      safe_fprintf(
+          stderr,
+          "block_size must be multiple of %d for O_DIRECT\n",
+          IO_DIRECT_MIN_BLOCK
+      );
+      (void)backend->close_fn(file_descriptor);
+      return false;
+    }
+
+    void* aligned_buffer = NULL;
+    const int align_result =
+        posix_memalign(&aligned_buffer, IO_ALIGN, config->block_size);
+    if (align_result != 0 || aligned_buffer == NULL) {
+      safe_fprintf(stderr, "posix_memalign failed, rc=%d\n", align_result);
+      (void)backend->close_fn(file_descriptor);
+      return false;
+    }
+    *output_buffer = aligned_buffer;
+  } else {
+    void* buffer = malloc(config->block_size);
+    if (buffer == NULL) {
+      perror("malloc");
+      (void)backend->close_fn(file_descriptor);
+      return false;
+    }
+    *output_buffer = buffer;
+  }
+  return true;
+}
+
+static void perform_io_operations(
+    const config_t* config,
+    const io_backend_ops_t* backend,
+    int file_descriptor,
+    void* buffer
+) {
+  uint32_t random_state = (uint32_t)time(NULL);
+  off_t current_offset = config->range_start;
+
+  for (size_t block_index = 0; block_index < config->block_count;
+       ++block_index) {
+    off_t offset_value =
+        calculate_offset(config, &current_offset, &random_state);
+
+    if (!perform_single_io_operation(
+            config, backend, file_descriptor, buffer, offset_value
+        )) {
+      break;
+    }
+  }
+}
+
 int main(int argument_count, char** argument_values) {
   config_t config;
   if (!parse_args(argument_count, argument_values, &config)) {
@@ -306,7 +461,7 @@ int main(int argument_count, char** argument_values) {
     return EXIT_FAILURE;
   }
 
-  int open_flags =
+  unsigned int open_flags =
       (config.operation_mode == MODE_READ) ? O_RDONLY : (O_WRONLY | O_CREAT);
 
   if (config.use_direct && config.use_vtpc) {
@@ -334,107 +489,22 @@ int main(int argument_count, char** argument_values) {
   }
 
   const int file_descriptor =
-      backend->open_fn(config.file_path, open_flags, (int)IO_DEFAULT_MODE);
+      backend->open_fn(config.file_path, (int)open_flags, (int)IO_DEFAULT_MODE);
   if (file_descriptor < 0) {
     perror("open/vtpc_open");
     return EXIT_FAILURE;
   }
 
   void* buffer = NULL;
-  const bool need_aligned_buffer = (config.use_direct && !config.use_vtpc);
-  if (need_aligned_buffer) {
-    if ((config.block_size % IO_DIRECT_MIN_BLOCK) != 0U) {
-      safe_fprintf(
-          stderr,
-          "block_size must be multiple of %d for O_DIRECT\n",
-          IO_DIRECT_MIN_BLOCK
-      );
-      (void)backend->close_fn(file_descriptor);
-      return EXIT_FAILURE;
-    }
-
-    void* aligned_buffer = NULL;
-    const int align_result =
-        posix_memalign(&aligned_buffer, IO_ALIGN, config.block_size);
-    if (align_result != 0 || aligned_buffer == NULL) {
-      safe_fprintf(stderr, "posix_memalign failed, rc=%d\n", align_result);
-      (void)backend->close_fn(file_descriptor);
-      return EXIT_FAILURE;
-    }
-    buffer = aligned_buffer;
-  } else {
-    buffer = malloc(config.block_size);
-    if (buffer == NULL) {
-      perror("malloc");
-      (void)backend->close_fn(file_descriptor);
-      return EXIT_FAILURE;
-    }
+  if (!allocate_buffer(&config, backend, file_descriptor, &buffer)) {
+    return EXIT_FAILURE;
   }
 
   if (config.operation_mode == MODE_WRITE) {
     memset(buffer, IO_WRITE_PATTERN, config.block_size);
   }
 
-  uint32_t random_state = (uint32_t)time(NULL);
-  off_t current_offset = config.range_start;
-
-  for (size_t block_index = 0; block_index < config.block_count;
-       ++block_index) {
-    off_t offset_value = 0;
-    if (config.selection_mode == SEL_SEQ) {
-      offset_value = current_offset;
-      current_offset += (off_t)config.block_size;
-      if (config.range_end != 0 &&
-          (current_offset + (off_t)config.block_size > config.range_end)) {
-        current_offset = config.range_start;
-      }
-    } else {
-      if (config.range_end == 0) {
-        offset_value = config.range_start;
-      } else {
-        offset_value = choose_random_offset(
-            config.range_start,
-            config.range_end,
-            config.block_size,
-            &random_state
-        );
-      }
-    }
-
-    if (!seek_to_offset(backend, file_descriptor, offset_value)) {
-      perror("lseek/vtpc_lseek");
-      break;
-    }
-
-    ssize_t bytes_processed = 0;
-    if (config.operation_mode == MODE_READ) {
-      bytes_processed =
-          backend->read_fn(file_descriptor, buffer, config.block_size);
-    } else {
-      bytes_processed =
-          backend->write_fn(file_descriptor, buffer, config.block_size);
-    }
-
-    if (bytes_processed < 0) {
-      perror(
-          (config.operation_mode == MODE_READ) ? "read/vtpc_read"
-                                               : "write/vtpc_write"
-      );
-      break;
-    }
-
-    if ((size_t)bytes_processed != config.block_size) {
-      safe_fprintf(
-          stderr,
-          "short %s at offset %jd: got %zd, expected %zu\n",
-          (config.operation_mode == MODE_READ) ? "read" : "write",
-          (intmax_t)offset_value,
-          bytes_processed,
-          config.block_size
-      );
-      break;
-    }
-  }
+  perform_io_operations(&config, backend, file_descriptor, buffer);
 
   if (config.operation_mode == MODE_WRITE) {
     if (backend->fsync_fn(file_descriptor) != 0) {

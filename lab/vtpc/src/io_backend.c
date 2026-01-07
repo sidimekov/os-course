@@ -1,7 +1,6 @@
 #define _GNU_SOURCE
 #include "io_backend.h"
 
-#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 

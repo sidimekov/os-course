@@ -1,9 +1,9 @@
 #include "vtpc.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
-#include <fcntl.h>
 
 #include "vtpc_internal.h"
 
@@ -14,8 +14,9 @@ int vtpc_open(const char* path, int mode, int access) {
   }
 
   int vfd = vtpc_fd_alloc();
-  if (vfd < 0)
+  if (vfd < 0) {
     return -1;
+  }
 
   int os_fd = vtpc_io_open_direct(path, mode, access);
   if (os_fd < 0) {
@@ -48,9 +49,11 @@ int vtpc_close(int fd) {
 
   const int os_fd = f->os_fd;
 
-  if ((f->mode & O_ACCMODE) != O_RDONLY) {
-    if (vtpc_fsync(fd) != 0) return -1;
-}
+  if (((unsigned int)f->mode & O_ACCMODE) != O_RDONLY) {
+    if (vtpc_fsync(fd) != 0) {
+      return -1;
+    }
+  }
 
   vtpc_cache_forget_file(fd);
 
@@ -82,6 +85,11 @@ ssize_t vtpc_read(int fd, void* buf, size_t count) {
   if (!f) {
     return -1;
   }
+  unsigned int acc = (unsigned int)f->mode & O_ACCMODE;
+  if (acc == O_WRONLY) {
+    errno = EBADF;
+    return -1;
+  }
 
   if (!buf && count != 0) {
     errno = EINVAL;
@@ -92,8 +100,9 @@ ssize_t vtpc_read(int fd, void* buf, size_t count) {
   }
 
   off_t disk_size = vtpc_io_get_size(f->os_fd);
-  if (disk_size < 0)
+  if (disk_size < 0) {
     return -1;
+  }
 
   if (disk_size > f->size) {
     f->size = disk_size;
@@ -112,7 +121,7 @@ ssize_t vtpc_read(int fd, void* buf, size_t count) {
     off_t page_index = cur / (off_t)VTPC_PAGE_SIZE;
     size_t page_off = (size_t)(cur % (off_t)VTPC_PAGE_SIZE);
 
-    CachePage* p = vtpc_cache_get_or_load(fd, f->os_fd, page_index, f->size);
+    CachePage* p = vtpc_cache_get_or_load(fd, f->os_fd, page_index);
     if (!p) {
       if (total > 0) {
         break;
@@ -198,8 +207,9 @@ ssize_t vtpc_write(int fd, const void* buf, size_t count) {
 
 int vtpc_fsync(int fd) {
   VtpcFile* f = vtpc_fd_get(fd);
-  if (!f)
+  if (!f) {
     return -1;
+  }
 
   if (vtpc_cache_flush_file(fd) != 0) {
     return -1;

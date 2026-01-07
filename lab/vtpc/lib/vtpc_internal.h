@@ -46,7 +46,7 @@ int vtpc_io_truncate(int os_fd, off_t size);
 
 CachePage* vtpc_cache_find(int vfd, off_t page_index);
 CachePage* vtpc_cache_get_or_load(
-    int vfd, int os_fd, off_t page_index, off_t file_size
+    int vfd, int os_fd, off_t page_index
 );
 CachePage* vtpc_cache_get_for_write(
     int vfd, int os_fd, off_t page_index, off_t file_size
