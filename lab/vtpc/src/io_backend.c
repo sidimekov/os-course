@@ -6,86 +6,59 @@
 
 #include "vtpc.h"
 
-static int libc_open_wrap(const char* path, int open_flags, int access_mode) {
-  return open(path, open_flags, access_mode);
+// libc wrappers (фикс сигнатур)
+static int libc_open(const char* p, int f, int m) {
+  return open(p, f, m);
+}
+static int libc_close(int fd) {
+  return close(fd);
+}
+static ssize_t libc_read(int fd, void* b, size_t c) {
+  return read(fd, b, c);
+}
+static ssize_t libc_write(int fd, const void* b, size_t c) {
+  return write(fd, b, c);
+}
+static off_t libc_lseek(int fd, off_t o, int w) {
+  return lseek(fd, o, w);
+}
+static int libc_fsync(int fd) {
+  return fsync(fd);
 }
 
-static int libc_close_wrap(int file_descriptor) {
-  return close(file_descriptor);
+// vtpc wrappers
+static int vtpc_open_w(const char* p, int f, int m) {
+  return vtpc_open(p, f, m);
+}
+static int vtpc_close_w(int fd) {
+  return vtpc_close(fd);
+}
+static ssize_t vtpc_read_w(int fd, void* b, size_t c) {
+  return vtpc_read(fd, b, c);
+}
+static ssize_t vtpc_write_w(int fd, const void* b, size_t c) {
+  return vtpc_write(fd, b, c);
+}
+static off_t vtpc_lseek_w(int fd, off_t o, int w) {
+  return vtpc_lseek(fd, o, w);
+}
+static int vtpc_fsync_w(int fd) {
+  return vtpc_fsync(fd);
 }
 
-static ssize_t libc_read_wrap(
-    int file_descriptor, void* buffer, size_t byte_count
-) {
-  return read(file_descriptor, buffer, byte_count);
-}
-
-static ssize_t libc_write_wrap(
-    int file_descriptor, const void* buffer, size_t byte_count
-) {
-  return write(file_descriptor, buffer, byte_count);
-}
-
-static off_t libc_lseek_wrap(int file_descriptor, off_t offset, int whence) {
-  return lseek(file_descriptor, offset, whence);
-}
-
-static int libc_fsync_wrap(int file_descriptor) {
-  return fsync(file_descriptor);
-}
-
-static const io_backend_ops_t LIBC_BACKEND = {
-    .open_fn = libc_open_wrap,
-    .close_fn = libc_close_wrap,
-    .read_fn = libc_read_wrap,
-    .write_fn = libc_write_wrap,
-    .lseek_fn = libc_lseek_wrap,
-    .fsync_fn = libc_fsync_wrap,
-    .backend_name = "libc",
+static const io_backend_ops_t LIBC_OPS = {
+    libc_open, libc_close, libc_read, libc_write, libc_lseek, libc_fsync
 };
 
-static int vtpc_open_wrap(const char* path, int open_flags, int access_mode) {
-  return vtpc_open(path, open_flags, access_mode);
-}
-
-static int vtpc_close_wrap(int file_descriptor) {
-  return vtpc_close(file_descriptor);
-}
-
-static ssize_t vtpc_read_wrap(
-    int file_descriptor, void* buffer, size_t byte_count
-) {
-  return vtpc_read(file_descriptor, buffer, byte_count);
-}
-
-static ssize_t vtpc_write_wrap(
-    int file_descriptor, const void* buffer, size_t byte_count
-) {
-  return vtpc_write(file_descriptor, buffer, byte_count);
-}
-
-static off_t vtpc_lseek_wrap(int file_descriptor, off_t offset, int whence) {
-  return vtpc_lseek(file_descriptor, offset, whence);
-}
-
-static int vtpc_fsync_wrap(int file_descriptor) {
-  return vtpc_fsync(file_descriptor);
-}
-
-static const io_backend_ops_t VTPC_BACKEND = {
-    .open_fn = vtpc_open_wrap,
-    .close_fn = vtpc_close_wrap,
-    .read_fn = vtpc_read_wrap,
-    .write_fn = vtpc_write_wrap,
-    .lseek_fn = vtpc_lseek_wrap,
-    .fsync_fn = vtpc_fsync_wrap,
-    .backend_name = "vtpc",
+static const io_backend_ops_t VTPC_OPS = {
+    vtpc_open_w,
+    vtpc_close_w,
+    vtpc_read_w,
+    vtpc_write_w,
+    vtpc_lseek_w,
+    vtpc_fsync_w
 };
 
-// выбор бэкенда по флагу
-const io_backend_ops_t* io_backend_get(bool use_vtpc) {
-  if (use_vtpc) {
-    return &VTPC_BACKEND;
-  }
-  return &LIBC_BACKEND;
+const io_backend_ops_t* io_backend_get(int use_vtpc) {
+  return use_vtpc ? &VTPC_OPS : &LIBC_OPS;
 }
