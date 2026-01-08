@@ -8,7 +8,7 @@
 
 enum { VTPC_MAX_FILES = 64 };
 enum { VTPC_PAGE_SIZE = 4096 };
-enum { VTPC_CACHE_PAGES = 64 };
+enum { VTPC_CACHE_PAGES = 16384 };
 enum { VTPC_ALIGNMENT = 4096 };
 
 typedef struct {
