@@ -66,6 +66,9 @@ static void vtkm_format_device_info(const char *query) {
   struct block_device *bdev;
   const struct gendisk *disk;
   sector_t sectors;
+  unsigned int logical_block_size;
+  unsigned int physical_block_size;
+  bool read_only;
   dev_t devt;
   int result;
 
@@ -93,13 +96,21 @@ static void vtkm_format_device_info(const char *query) {
 
   disk = bdev->bd_disk;
   sectors = bdev_nr_sectors(bdev);
+  /* Размеры блоков и флаг read-only для мониторинга. */
+  logical_block_size = bdev_logical_block_size(bdev);
+  physical_block_size = bdev_physical_block_size(bdev);
+  read_only = bdev_read_only(bdev);
   vtkm_set_response(
-    "device=%s\nmajor=%u\nminor=%u\nsize_bytes=%llu\nsize_sectors=%llu\n",
+    "device=%s\nmajor=%u\nminor=%u\nsize_bytes=%llu\nsize_sectors=%llu\n"
+    "logical_block_size=%u\nphysical_block_size=%u\nread_only=%s\n",
     disk ? disk->disk_name : "unknown",
     MAJOR(bdev->bd_dev),
     MINOR(bdev->bd_dev),
     (unsigned long long)(sectors << 9),
-    (unsigned long long)sectors
+    (unsigned long long)sectors,
+    logical_block_size,
+    physical_block_size,
+    read_only ? "yes" : "no"
   );
 
   blkdev_put(bdev, FMODE_READ);
