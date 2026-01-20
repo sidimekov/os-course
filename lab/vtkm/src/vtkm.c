@@ -4,6 +4,10 @@
 #include <linux/proc_fs.h>
 #include <linux/uaccess.h>
 #include <linux/mutex.h>
+#include <linux/blkdev.h>
+#include <linux/string.h>
+#include <linux/kernel.h>
+#include <linux/stdarg.h>
 
 #define MODULE_NAME "vtkm"
 #define PROC_FILE_NAME "vtkm"
@@ -20,6 +24,53 @@ static DEFINE_MUTEX(vtkm_lock);
 static char vtkm_buffer[BUFFER_SIZE];
 static size_t vtkm_buffer_len;
 
+static void vtkm_set_response(const char *fmt, ...) {
+  va_list args;
+
+  mutex_lock(&vtkm_lock);
+  va_start(args, fmt);
+  vtkm_buffer_len = vscnprintf(vtkm_buffer, BUFFER_SIZE, fmt, args);
+  va_end(args);
+  mutex_unlock(&vtkm_lock);
+}
+
+static void vtkm_format_device_info(const char *query) {
+  char path[BUFFER_SIZE];
+  struct block_device *bdev;
+  const struct gendisk *disk;
+  sector_t sectors;
+
+  if (query[0] == '\0') {
+    vtkm_set_response("error: empty query\nusage: echo sda1 > /proc/%s\n", PROC_FILE_NAME);
+    return;
+  }
+
+  if (strncmp(query, "/dev/", 5) == 0) {
+    strscpy(path, query, BUFFER_SIZE);
+  } else {
+    scnprintf(path, BUFFER_SIZE, "/dev/%s", query);
+  }
+
+  bdev = blkdev_get_by_path(path, FMODE_READ, NULL);
+  if (IS_ERR(bdev)) {
+    vtkm_set_response("error: cannot open %s\n", path);
+    return;
+  }
+
+  disk = bdev->bd_disk;
+  sectors = bdev_nr_sectors(bdev);
+  vtkm_set_response(
+    "device=%s\nmajor=%u\nminor=%u\nsize_bytes=%llu\nsize_sectors=%llu\n",
+    disk ? disk->disk_name : "unknown",
+    MAJOR(bdev->bd_dev),
+    MINOR(bdev->bd_dev),
+    (unsigned long long)(sectors << 9),
+    (unsigned long long)sectors
+  );
+
+  blkdev_put(bdev, FMODE_READ);
+}
+
 static ssize_t vtkm_proc_read(struct file *file, char __user *buf, size_t count, loff_t *ppos) {
   ssize_t ret;
 
@@ -31,25 +82,22 @@ static ssize_t vtkm_proc_read(struct file *file, char __user *buf, size_t count,
 }
 
 static ssize_t vtkm_proc_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos) {
+  char query[BUFFER_SIZE];
   size_t copy_len = min(count, (size_t)BUFFER_SIZE - 1);
-  ssize_t not_copied;
 
   if (count == 0) {
     return 0;
   }
 
-  mutex_lock(&vtkm_lock);
-  memset(vtkm_buffer, 0, BUFFER_SIZE);
-  not_copied = copy_from_user(vtkm_buffer, buf, copy_len);
-  vtkm_buffer_len = copy_len - not_copied;
-  vtkm_buffer[vtkm_buffer_len] = '\0';
-  mutex_unlock(&vtkm_lock);
-
-  if (not_copied != 0) {
+  if (copy_from_user(query, buf, copy_len)) {
     return -EFAULT;
   }
+  query[copy_len] = '\0';
+  strim(query);
 
-  LOG("received query: %s\n", vtkm_buffer);
+  LOG("received query: %s\n", query);
+  vtkm_format_device_info(query);
+
   return count;
 }
 
@@ -59,10 +107,7 @@ static const struct proc_ops vtkm_proc_ops = {
 };
 
 static int __init vtkm_init(void) {
-  mutex_lock(&vtkm_lock);
-  memset(vtkm_buffer, 0, BUFFER_SIZE);
-  vtkm_buffer_len = scnprintf(vtkm_buffer, BUFFER_SIZE, "VTKM ready. Write device id to /proc/%s\n", PROC_FILE_NAME);
-  mutex_unlock(&vtkm_lock);
+  vtkm_set_response("VTKM ready. Write device id to /proc/%s\n", PROC_FILE_NAME);
 
   vtkm_proc_entry = proc_create(PROC_FILE_NAME, 0666, NULL, &vtkm_proc_ops);
   if (!vtkm_proc_entry) {
